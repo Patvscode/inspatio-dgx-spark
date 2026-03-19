@@ -1,0 +1,47 @@
+# Core deep learning
+# Install PyTorch first with the appropriate CUDA version for your system:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# Or visit https://pytorch.org/get-started for other CUDA versions.
+# torch>=2.3.0
+# torchvision>=0.18.0
+
+# Video / image
+decord>=0.6.0
+opencv-python>=4.8.0
+Pillow>=10.0.0
+
+# Model / training utilities
+einops>=0.7.0
+omegaconf>=2.3.0
+safetensors>=0.4.0
+transformers>=4.38.0,<5.0.0
+accelerate>=0.27.0
+diffusers>=0.27.0
+timm>=0.9.0
+numpy<2.0
+
+# Misc
+tqdm>=4.65.0
+plyfile>=1.0
+easydict>=1.9
+imageio>=2.28.0
+ftfy>=6.0.0
+av>=12.0.0
+#flash-attn>=2.5.0
+
+# Depth estimation (Step 2)
+depth_anything_3>=0.1.0
+open3d>=0.17.0
+scipy>=1.10.0
+
+
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# pip install -r requirements.txt
+# pip install psutil
+# pip install transformers==4.41.2
+# pip install timm
+# pip install decord
+# pip install easydict
+# pip install diffusers
+# pip install ftfy
+# pip install av

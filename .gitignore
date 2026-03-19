@@ -1,0 +1,23 @@
+# Exclude checkpoints, output, and specific test dirs
+checkpoints/
+checkpoints
+output/
+test/example/new_vggt/
+test/example2/new_vggt/
+test/example3/new_vggt/
+
+test/example/new.json
+test/example2/new.json
+.claude
+condaenv.pkapro9t.requirements.txt
+
+# Common Python ignores
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+*.so
+.env

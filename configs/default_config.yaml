@@ -1,0 +1,31 @@
+warp_denoising_step: false
+causal: true
+
+height: 480
+width: 832
+num_frames: 81
+
+dataset_v2v:
+  video_size:
+  - 480
+  - 832
+  num_frames: 45
+  clip_root: /
+  annot_root: /
+  json_path: null
+  target_fps: 15
+  force_fps: false
+  skip_frms_num: 0
+  drop_last_frms_num: 0
+  cond_frms_mode: null
+  random_start: true
+  max_clips: null
+  duplicate_meta: 1
+  use_loss_mask: false
+  video_crop_max: -1
+  cond_frms_crop_max: -1
+  ref_frms_crop_max: -1
+  force_to_image_prob: -1
+  frame_tick_size: 8
+  width_tick_size: 16
+  height_tick_size: 16

@@ -1,0 +1,9 @@
+[
+    {
+        "video_path": "./test/example2/coffee_martini.mp4",
+        "vggt_depth_path": "./test/example2/new_vggt/coffee_martini",
+        "vggt_extrinsics_path": "./test/example2/new_vggt/coffee_martini/extrinsics.txt",
+        "radius_ratio": 1,
+        "text": "The image shows a bartender in a kitchen preparing a drink. He is wearing a black apron and a blue cap, and is standing behind a white countertop with various bottles of alcohol on it. The bartender is pouring a drink into a martini glass with a metal shaker. There are several other bottles of different types of alcohol scattered around the countertop, including bottles of liquor, a coffee maker, and a pitcher. In the background, there is a window with white blinds and a bookshelf with books and other decorative items. The kitchen appears to be well-lit with natural light coming in from the windows."
+    }
+]

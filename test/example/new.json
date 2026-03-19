@@ -1,0 +1,9 @@
+[
+    {
+        "video_path": "./test/example/cropped_source.mp4",
+        "vggt_depth_path": "./test/example/new_vggt/cropped_source",
+        "vggt_extrinsics_path": "./test/example/new_vggt/cropped_source/extrinsics.txt",
+        "radius_ratio": 1,
+        "text": "The image shows a white table with a small white cup and saucer on it. The cup is filled with a dark liquid, possibly coffee or tea, and is being poured into it. On the right side of the table, there is a small piece of paper with some food items on it, including some cookies. The table is covered in crumbs and there are a few scattered pieces of food around the cup. The background is dark, and the focus is on the cup and the food items. The overall mood of the image is dark and moody."
+    }
+]
