@@ -400,6 +400,22 @@ if [ "$SKIP_STEP3" = false ]; then
     echo ""
     echo "========== Step 3: Running v2v inference =========="
 
+    # Convert T5 encoder .pth -> .safetensors if needed
+    T5_PTH="${SCRIPT_DIR}/checkpoints/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.pth"
+    T5_ST="${SCRIPT_DIR}/checkpoints/Wan2.1-T2V-1.3B/models_t5_umt5-xxl-enc-bf16.safetensors"
+    if [ ! -f "$T5_ST" ]; then
+        if [ ! -f "$T5_PTH" ]; then
+            echo "Error: Wan T5 encoder weight not found at: $T5_PTH"
+            echo "Please download Wan2.1-T2V-1.3B weights to: ${SCRIPT_DIR}/checkpoints/Wan2.1-T2V-1.3B/"
+            exit 1
+        fi
+        echo "  Converting T5 encoder: .pth -> .safetensors ..."
+        python "$SCRIPT_DIR/utils/convert_pth_to_safetensors.py" \
+            --input "$T5_PTH" \
+            --output "$T5_ST"
+        echo "  Conversion done: $T5_ST"
+    fi
+
     if [ -z "$CHECKPOINT_PATH" ]; then
         echo "Error: --checkpoint_path is required for Step 3"
         exit 1
