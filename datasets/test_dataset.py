@@ -43,13 +43,16 @@ class TestDataset():
     MIN_ANGLE_PER_FRAME = 0.3
     MAX_ANGLE_PER_FRAME = 0.8
 
-    def __init__(self, sample_size, sample_n_frames, cam_idx=1, traj_txt_path=None, relative_to_source=False, rotation_only=False):
+    def __init__(self, sample_size, sample_n_frames, cam_idx=1, traj_txt_path=None, relative_to_source=False, rotation_only=False, adaptive_frame=True, freeze_repeat=0, freeze_frame=None):
         self.sample_n_frames = sample_n_frames
         self.sample_size = sample_size   # h, w
         self.cam_idx = cam_idx
         self.traj_txt_path = traj_txt_path
         self.relative_to_source = relative_to_source
         self.rotation_only = rotation_only
+        self.adaptive_frame = adaptive_frame
+        self.freeze_repeat = freeze_repeat
+        self.freeze_frame = freeze_frame
 
     def read_matrix(self, file_path):
         with open(file_path, 'r') as file:
@@ -95,6 +98,21 @@ class TestDataset():
         mask_video = (mask_video > 0.5).float()
         mask_video = mask_video * 2.0 - 1.0  # to [-1, 1] range
 
+        # Time-freeze: repeat a frame in source_video to match render/mask freeze
+        if self.freeze_repeat > 0:
+            n_src = source_video.shape[0]
+            freeze_idx = self.freeze_frame if self.freeze_frame is not None else n_src // 2
+            freeze_idx = max(0, min(freeze_idx, n_src - 1))
+            insert_pos = freeze_idx + 1
+            frozen_frame = source_video[freeze_idx:freeze_idx+1]  # (1, C, H, W)
+            source_video = torch.cat([
+                source_video[:insert_pos],
+                frozen_frame.expand(self.freeze_repeat, -1, -1, -1),
+                source_video[insert_pos:],
+            ], dim=0)
+            print(f'[Time-freeze] source_video: repeated frame {freeze_idx} x{self.freeze_repeat}, '
+                  f'{n_src} -> {source_video.shape[0]} frames')
+
         # Align frame counts: render/mask may differ slightly from source_video
         min_frames = min(source_video.shape[0], render_video.shape[0], mask_video.shape[0])
         source_video = source_video[:min_frames]
@@ -128,49 +146,52 @@ class TestDataset():
                 print("r_zoom", r_zoom)
 
             # ---- Adaptive frame count: determine needed frames based on trajectory angle range ----
-            total_angle = compute_traj_total_angle(x_up_angle, y_left_angle)
-            if total_angle > 1e-3:
-                min_needed = max(2, int(np.ceil(total_angle / self.MAX_ANGLE_PER_FRAME)) + 1)
-                max_needed = max(2, int(np.floor(total_angle / self.MIN_ANGLE_PER_FRAME)) + 1)
+            if self.adaptive_frame:
+                total_angle = compute_traj_total_angle(x_up_angle, y_left_angle)
+                if total_angle > 1e-3:
+                    min_needed = max(2, int(np.ceil(total_angle / self.MAX_ANGLE_PER_FRAME)) + 1)
+                    max_needed = max(2, int(np.floor(total_angle / self.MIN_ANGLE_PER_FRAME)) + 1)
+                else:
+                    # Pure zoom trajectory (no angular change), no frame count adjustment needed
+                    min_needed = n_frames
+                    max_needed = n_frames
+
+                angle_per_frame = total_angle / max(n_frames - 1, 1) if total_angle > 1e-3 else 0
+                print(f'[Traj adaptive] total_angle={total_angle:.1f}, n_frames={n_frames}, '
+                      f'angle_per_frame={angle_per_frame:.3f}, '
+                      f'needed_range=[{min_needed}, {max_needed}]')
+
+                # Expand target: at least min_needed and at least 121 frames
+                expand_target = max(min_needed, 121)
+
+                if n_frames < expand_target:
+                    # Not enough source frames: too fast or below 121 frames minimum
+                    target_n_frames = expand_target
+                    reason = []
+                    if n_frames < min_needed:
+                        reason.append(f'too fast ({angle_per_frame:.2f}/frame > {self.MAX_ANGLE_PER_FRAME}/frame)')
+                    if n_frames < 121:
+                        reason.append(f'below minimum 121 frames')
+                    print(f'[Traj adaptive] {", ".join(reason)}, '
+                          f'expanding source from {n_frames} to {target_n_frames} frames (bounce)')
+                    expand_indices = bounce_indices(n_frames, target_n_frames)
+                    source_video = source_video[expand_indices]
+                    render_video = render_video[expand_indices]
+                    mask_video = mask_video[expand_indices]
+                    n_frames = target_n_frames
+                elif n_frames > max_needed:
+                    target_n_frames = max_needed
+                    print(f'[Traj adaptive] Too slow ({angle_per_frame:.2f}/frame < {self.MIN_ANGLE_PER_FRAME}/frame), '
+                          f'subsampling source from {n_frames} to {target_n_frames} frames')
+                    subsample_indices = np.linspace(0, n_frames - 1, target_n_frames).astype(int).tolist()
+                    source_video = source_video[subsample_indices]
+                    render_video = render_video[subsample_indices]
+                    mask_video = mask_video[subsample_indices]
+                    n_frames = target_n_frames
+                else:
+                    print(f'[Traj adaptive] Frame count OK, no adjustment needed')
             else:
-                # Pure zoom trajectory (no angular change), no frame count adjustment needed
-                min_needed = n_frames
-                max_needed = n_frames
-
-            angle_per_frame = total_angle / max(n_frames - 1, 1) if total_angle > 1e-3 else 0
-            print(f'[Traj adaptive] total_angle={total_angle:.1f}, n_frames={n_frames}, '
-                  f'angle_per_frame={angle_per_frame:.3f}, '
-                  f'needed_range=[{min_needed}, {max_needed}]')
-
-            # Expand target: at least min_needed and at least 121 frames
-            expand_target = max(min_needed, 121)
-
-            if n_frames < expand_target:
-                # Not enough source frames: too fast or below 121 frames minimum
-                target_n_frames = expand_target
-                reason = []
-                if n_frames < min_needed:
-                    reason.append(f'too fast ({angle_per_frame:.2f}/frame > {self.MAX_ANGLE_PER_FRAME}/frame)')
-                if n_frames < 121:
-                    reason.append(f'below minimum 121 frames')
-                print(f'[Traj adaptive] {", ".join(reason)}, '
-                      f'expanding source from {n_frames} to {target_n_frames} frames (bounce)')
-                expand_indices = bounce_indices(n_frames, target_n_frames)
-                source_video = source_video[expand_indices]
-                render_video = render_video[expand_indices]
-                mask_video = mask_video[expand_indices]
-                n_frames = target_n_frames
-            elif n_frames > max_needed:
-                target_n_frames = max_needed
-                print(f'[Traj adaptive] Too slow ({angle_per_frame:.2f}/frame < {self.MIN_ANGLE_PER_FRAME}/frame), '
-                      f'subsampling source from {n_frames} to {target_n_frames} frames')
-                subsample_indices = np.linspace(0, n_frames - 1, target_n_frames).astype(int).tolist()
-                source_video = source_video[subsample_indices]
-                render_video = render_video[subsample_indices]
-                mask_video = mask_video[subsample_indices]
-                n_frames = target_n_frames
-            else:
-                print(f'[Traj adaptive] Frame count OK, no adjustment needed')
+                print(f'[Traj adaptive] Disabled, using original {n_frames} frames')
 
             # Generate target extrinsics from trajectory (for saving/reference)
             target_extrinsics = generate_traj_txt(x_up_angle, y_left_angle, r, r_zoom, n_frames, is_translation=self.rotation_only)  # Twc

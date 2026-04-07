@@ -30,6 +30,11 @@ set -e
 #   --skip_step1          (optional) Skip Step 1
 #   --skip_step2          (optional) Skip Step 2
 #   --skip_step3          (optional) Skip Step 3
+#   --relative_to_source  (optional) Compose trajectory poses relative to initial view
+#   --rotation_only       (optional) Only apply rotation, ignore translation (tripod pan/tilt)
+#   --disable_adaptive_frame (optional) Disable adaptive frame expansion/subsampling
+#   --freeze_repeat       (optional) Repeat a frame N times for time-freeze effect (default: 0, disabled)
+#   --freeze_frame        (optional) Frame index to freeze (default: middle frame)
 ##############################################################################
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +52,12 @@ OUTPUT_FOLDER=""
 SKIP_STEP1=false
 SKIP_STEP2=false
 SKIP_STEP3=false
+RELATIVE_TO_SOURCE=false
+ROTATION_ONLY=false
+ADAPTIVE_FRAME=true
 MASTER_PORT=29513
+FREEZE_REPEAT=0
+FREEZE_FRAME=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -108,8 +118,28 @@ while [[ $# -gt 0 ]]; do
             SKIP_STEP3=true
             shift
             ;;
+        --relative_to_source)
+            RELATIVE_TO_SOURCE=true
+            shift
+            ;;
+        --rotation_only)
+            ROTATION_ONLY=true
+            shift
+            ;;
+        --disable_adaptive_frame)
+            ADAPTIVE_FRAME=false
+            shift
+            ;;
         --master_port)
             MASTER_PORT="$2"
+            shift 2
+            ;;
+        --freeze_repeat)
+            FREEZE_REPEAT="$2"
+            shift 2
+            ;;
+        --freeze_frame)
+            FREEZE_FRAME="$2"
             shift 2
             ;;
         *)
@@ -149,6 +179,11 @@ echo "  Checkpoint:      $CHECKPOINT_PATH"
 echo "  Config:          $CONFIG_PATH"
 echo "  DA3 model:       $DA3_MODEL_PATH"
 echo "  Florence model:  $FLORENCE_MODEL_PATH"
+echo "  Relative to source: $RELATIVE_TO_SOURCE"
+echo "  Rotation only:   $ROTATION_ONLY"
+echo "  Adaptive frame:  $ADAPTIVE_FRAME"
+echo "  Freeze repeat:   $FREEZE_REPEAT"
+echo "  Freeze frame:    ${FREEZE_FRAME:-auto (middle)}"
 echo "============================================"
 
 ##############################################################################
@@ -256,7 +291,11 @@ python "$SCRIPT_DIR/scripts/run_render_parallel.py" \
     --gpu_list "$STEP2_GPUS" \
     --render_script "$RENDER_SCRIPT" \
     --traj_txt_path "$TRAJ_TXT_PATH" \
-    --width 832 --height 480
+    --width 832 --height 480 \
+    $([ "$RELATIVE_TO_SOURCE" = true ] && echo "--relative_to_source") \
+    $([ "$ROTATION_ONLY" = true ] && echo "--rotation_only") \
+    $([ "$FREEZE_REPEAT" -gt 0 ] 2>/dev/null && echo "--freeze_repeat $FREEZE_REPEAT") \
+    $([ -n "$FREEZE_FRAME" ] && echo "--freeze_frame $FREEZE_FRAME")
 
 echo "Step 2b completed. Point clouds rendered."
 
@@ -294,6 +333,13 @@ if [ "$SKIP_STEP3" = false ]; then
     TMP_CONFIG=$(mktemp /tmp/pipeline_config_XXXXXX.yaml)
     cp "$CONFIG_PATH" "$TMP_CONFIG"
     sed -i "/^[[:space:]]*#/!s|traj_txt_path:.*|traj_txt_path: ${TRAJ_TXT_PATH}|g" "$TMP_CONFIG"
+    sed -i "/^[[:space:]]*#/!s|relative_to_source:.*|relative_to_source: ${RELATIVE_TO_SOURCE}|g" "$TMP_CONFIG"
+    sed -i "/^[[:space:]]*#/!s|rotation_only:.*|rotation_only: ${ROTATION_ONLY}|g" "$TMP_CONFIG"
+    sed -i "/^[[:space:]]*#/!s|adaptive_frame:.*|adaptive_frame: ${ADAPTIVE_FRAME}|g" "$TMP_CONFIG"
+    sed -i "/^[[:space:]]*#/!s|freeze_repeat:.*|freeze_repeat: ${FREEZE_REPEAT}|g" "$TMP_CONFIG"
+    if [ -n "$FREEZE_FRAME" ]; then
+        sed -i "/^[[:space:]]*#/!s|freeze_frame:.*|freeze_frame: ${FREEZE_FRAME}|g" "$TMP_CONFIG"
+    fi
 
     CUDA_VISIBLE_DEVICES=$STEP3_GPUS torchrun \
         --nproc_per_node=$STEP3_NPROC \

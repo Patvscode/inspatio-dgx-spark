@@ -132,6 +132,11 @@ A trajectory file is a plain text file with **3 lines**, each containing space-s
 | `--skip_step1` | No | false | Skip caption generation |
 | `--skip_step2` | No | false | Skip depth estimation |
 | `--skip_step3` | No | false | Skip v2v inference |
+| `--relative_to_source` | No | false | Compose trajectory poses relative to initial view |
+| `--rotation_only` | No | false | Only apply rotation from trajectory, ignore translation (tripod pan/tilt) |
+| `--disable_adaptive_frame` | No | false | Disable adaptive frame expansion/subsampling (use original frame count as-is) |
+| `--freeze_repeat` | No | `0` | Repeat a specific frame N extra times to create a time-freeze (pause) effect |
+| `--freeze_frame` | No | middle frame | Frame index to freeze; defaults to the middle frame if not specified |
 
 ### Skip Already-Completed Steps
 

@@ -19,7 +19,7 @@ import sys
 
 
 def render_video(args):
-    idx, entry, gpu_id, total_videos, render_script, traj_txt_path, width, height = args
+    idx, entry, gpu_id, total_videos, render_script, traj_txt_path, width, height, relative_to_source, rotation_only, freeze_repeat, freeze_frame = args
     video_path = entry["video_path"]
     final_output = entry["vggt_depth_path"]
     da3_output = final_output + "_da3_tmp"
@@ -39,6 +39,14 @@ def render_video(args):
         "--width", str(width),
         "--height", str(height),
     ]
+    if relative_to_source:
+        cmd_render.append("--relative_to_source")
+    if rotation_only:
+        cmd_render.append("--rotation_only")
+    if freeze_repeat > 0:
+        cmd_render.extend(["--freeze_repeat", str(freeze_repeat)])
+    if freeze_frame is not None:
+        cmd_render.extend(["--freeze_frame", str(freeze_frame)])
     result = subprocess.run(cmd_render, env=env)
     if result.returncode != 0:
         print(f"[GPU {gpu_id}] Render failed for {video_name}", file=sys.stderr)
@@ -56,6 +64,14 @@ def main():
     parser.add_argument("--traj_txt_path", required=True, help="Trajectory file path")
     parser.add_argument("--width", type=int, default=832, help="Render width")
     parser.add_argument("--height", type=int, default=480, help="Render height")
+    parser.add_argument("--relative_to_source", action="store_true",
+                        help="Compose trajectory poses relative to initial view")
+    parser.add_argument("--rotation_only", action="store_true",
+                        help="Only apply rotation from the trajectory, ignore translation")
+    parser.add_argument("--freeze_repeat", type=int, default=0,
+                        help="Number of times to repeat the freeze frame (0 = disabled)")
+    parser.add_argument("--freeze_frame", type=int, default=None,
+                        help="Frame index to freeze (default: middle frame)")
     args = parser.parse_args()
 
     gpu_ids = args.gpu_list.split(",")
@@ -71,7 +87,7 @@ def main():
     tasks = []
     for i, entry in enumerate(data):
         gpu_id = gpu_ids[i % num_gpus]
-        tasks.append((i, entry, gpu_id, total_videos, args.render_script, args.traj_txt_path, args.width, args.height))
+        tasks.append((i, entry, gpu_id, total_videos, args.render_script, args.traj_txt_path, args.width, args.height, args.relative_to_source, args.rotation_only, args.freeze_repeat, args.freeze_frame))
 
     if num_gpus == 1:
         results = [render_video(t) for t in tasks]

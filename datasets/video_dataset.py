@@ -20,6 +20,9 @@ class VideoDataset(torch.utils.data.Dataset):
         self.traj_txt_path = kwargs.get('traj_txt_path', None)
         self.relative_to_source = kwargs.get('relative_to_source', False)
         self.rotation_only = kwargs.get('rotation_only', False)
+        self.adaptive_frame = kwargs.get('adaptive_frame', True)
+        self.freeze_repeat = kwargs.get('freeze_repeat', 0)
+        self.freeze_frame = kwargs.get('freeze_frame', None)
 
         if not isinstance(json_path, str):
             json_path = json_path[0]
@@ -36,6 +39,9 @@ class VideoDataset(torch.utils.data.Dataset):
             traj_txt_path=self.traj_txt_path,
             relative_to_source=self.relative_to_source,
             rotation_only=self.rotation_only,
+            adaptive_frame=self.adaptive_frame,
+            freeze_repeat=self.freeze_repeat,
+            freeze_frame=self.freeze_frame,
         )
         print(f"Loaded {len(self.dataset)} videos.")
 

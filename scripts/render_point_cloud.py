@@ -161,14 +161,28 @@ def load_intrinsic(da3_dir, device):
 
 
 def load_extrinsic_c2w(da3_dir, device):
-    """Load first-frame extrinsic from DA3 extrinsic.txt, return c2w (4x4)."""
+    """Load extrinsics from DA3 extrinsic.txt.
+
+    The file contains N frames, each stored as 3 rows of a 3x4 w2c matrix.
+
+    Returns:
+        initial_c2w: (4, 4) tensor, first-frame c2w
+        source_c2ws: list of (4, 4) tensors, all-frame c2ws
+    """
     path = os.path.join(da3_dir, "extrinsic.txt")
     data = np.loadtxt(path)
-    w2c_34 = data[0:3, :4].astype(np.float32)
-    w2c = np.vstack([w2c_34, np.array([[0, 0, 0, 1]], dtype=np.float32)])
-    w2c_t = torch.tensor(w2c, dtype=torch.float32, device=device)
-    c2w = torch.linalg.inv(w2c_t)
-    return c2w
+    num_frames = data.shape[0] // 3
+
+    source_c2ws = []
+    for i in range(num_frames):
+        w2c_34 = data[i * 3:(i + 1) * 3, :4].astype(np.float32)
+        w2c = np.vstack([w2c_34, np.array([[0, 0, 0, 1]], dtype=np.float32)])
+        w2c_t = torch.tensor(w2c, dtype=torch.float32, device=device)
+        c2w = torch.linalg.inv(w2c_t)
+        source_c2ws.append(c2w)
+
+    initial_c2w = source_c2ws[0]
+    return initial_c2w, source_c2ws
 
 
 def load_ply_sequence(da3_dir, device, max_frames=None):
@@ -205,17 +219,22 @@ def scale_intrinsic(K, target_width, target_height):
 
 # ── Camera pose generation ──
 
-def generate_target_c2ws(traj_txt_path, initial_c2w, num_frames, device):
+def generate_target_c2ws(traj_txt_path, initial_c2w, source_c2ws, num_frames, device,
+                         relative_to_source=False, rotation_only=False):
     """Generate target c2w poses from traj_txt.
 
     1. Read traj_txt -> generate_traj_txt() -> relative c2w offsets (N, 4, 4)
-    2. Compose with initial_c2w to get absolute c2w per frame
+    2. Optionally zero out translation (rotation_only)
+    3. Compose with initial_c2w (relative_to_source) or use as absolute poses
 
     Args:
         traj_txt_path: path to traj txt file (3 lines: x_up, y_left, r)
         initial_c2w: (4, 4) first-frame c2w from DA3
         num_frames: how many frames to generate
         device: torch device
+        relative_to_source: if True, compose relative poses on top of initial_c2w;
+                            if False, treat generated poses as absolute world coords
+        rotation_only: if True, zero out translation in relative poses (tripod pan/tilt)
 
     Returns:
         list of (4, 4) c2w tensors, length = num_frames
@@ -227,18 +246,23 @@ def generate_target_c2ws(traj_txt_path, initial_c2w, num_frames, device):
     r_raw = [float(i) for i in lines[2].split()]
 
     # generate_traj_txt returns relative c2w offsets (identity at frame 0)
-    # r and r_zoom are just r_raw (no radius scaling needed)
     relative_c2ws = generate_traj_txt(
-        x_up_angle, y_left_angle, r_raw, r_raw, num_frames
-    )  # (N, 4, 4) numpy, these are relative c2w transforms
+        x_up_angle, y_left_angle, r_raw, r_raw, num_frames, is_translation=rotation_only
+    )  # (N, 4, 4) numpy, these are relative c2w transforms # Twc
 
-    # Compose: absolute_c2w[i] = initial_c2w @ relative_c2w[i]
     target_c2ws = []
+    abs_source_c2ws = []
     for i in range(num_frames):
-        rel = torch.tensor(relative_c2ws[i], dtype=torch.float32, device=device)
-        abs_c2w = initial_c2w @ rel
-        target_c2ws.append(abs_c2w)
+        rel_source = source_c2ws[i]  # already a torch tensor (4,4) on device, Twc
+        abs_source_c2w = initial_c2w.inverse() @ rel_source # Tc0w @ Twc = Tc0c
+        abs_source_c2ws.append(abs_source_c2w)
 
+        rel = torch.tensor(relative_c2ws[i], dtype=torch.float32, device=device) #Twc
+        abs_target_c2w = initial_c2w.inverse() @ rel # Tc0w @ Twc = Tc0c
+        if relative_to_source:
+            abs_target_c2w = (abs_target_c2w.inverse() @ abs_source_c2w.inverse()).inverse() # (new_Tcw_tgt = Tcw_tgt @ Tcw_src).inverse
+
+        target_c2ws.append(abs_target_c2w)
     return target_c2ws
 
 
@@ -264,7 +288,8 @@ def open_ffmpeg_writer(output_path, width, height, fps=24):
 # ── Main rendering pipeline ──
 
 def render_point_cloud(da3_dir, traj_txt_path, output_dir, width=832, height=480,
-                       point_size=2, fps=24):
+                       point_size=2, fps=24, relative_to_source=False, rotation_only=False,
+                       freeze_repeat=0, freeze_frame=None):
     """Main entry: load data, generate poses, render, save mp4s."""
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Device: {device}")
@@ -272,17 +297,37 @@ def render_point_cloud(da3_dir, traj_txt_path, output_dir, width=832, height=480
     # Load camera params
     K_orig = load_intrinsic(da3_dir, device)
     K_render = scale_intrinsic(K_orig, width, height)
-    initial_c2w = load_extrinsic_c2w(da3_dir, device)
+    initial_c2w, source_c2ws = load_extrinsic_c2w(da3_dir, device)
     logger.info(f"Intrinsic (scaled to {width}x{height}):\n{K_render}")
     logger.info(f"Initial c2w:\n{initial_c2w}")
+    logger.info(f"Loaded {len(source_c2ws)} source extrinsics")
 
     # Load PLY sequence
     points_list, colors_list = load_ply_sequence(da3_dir, device)
     num_pcds = len(points_list)
     logger.info(f"Loaded {num_pcds} point clouds")
 
+    # Time-freeze: repeat a specific frame to create a pause effect
+    if freeze_repeat > 0:
+        if freeze_frame is None:
+            freeze_frame = num_pcds // 2
+        freeze_frame = max(0, min(freeze_frame, num_pcds - 1))
+        logger.info(f"Time-freeze: repeating frame {freeze_frame} x{freeze_repeat} "
+                     f"(inserting {freeze_repeat} extra frames)")
+        insert_pos = freeze_frame + 1
+        frozen_pts = points_list[freeze_frame]
+        frozen_cols = colors_list[freeze_frame]
+        frozen_c2w = source_c2ws[freeze_frame]
+        points_list = points_list[:insert_pos] + [frozen_pts] * freeze_repeat + points_list[insert_pos:]
+        colors_list = colors_list[:insert_pos] + [frozen_cols] * freeze_repeat + colors_list[insert_pos:]
+        source_c2ws = source_c2ws[:insert_pos] + [frozen_c2w] * freeze_repeat + source_c2ws[insert_pos:]
+        num_pcds = len(points_list)
+        logger.info(f"After freeze: {num_pcds} total frames")
+
     # Generate target camera poses
-    target_c2ws = generate_target_c2ws(traj_txt_path, initial_c2w, num_pcds, device)
+    target_c2ws = generate_target_c2ws(traj_txt_path, initial_c2w, source_c2ws, num_pcds, device,
+                                       relative_to_source=relative_to_source,
+                                       rotation_only=rotation_only)
     num_frames = len(target_c2ws)
     logger.info(f"Generated {num_frames} target camera poses")
 
@@ -348,6 +393,14 @@ def main():
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--point_size", type=int, default=2)
     parser.add_argument("--fps", type=int, default=24)
+    parser.add_argument("--relative_to_source", action="store_true",
+                        help="Compose trajectory poses relative to initial view (default: off, use absolute poses)")
+    parser.add_argument("--rotation_only", action="store_true",
+                        help="Only apply rotation from the trajectory, ignore translation (tripod pan/tilt)")
+    parser.add_argument("--freeze_repeat", type=int, default=0,
+                        help="Number of times to repeat the freeze frame (0 = disabled)")
+    parser.add_argument("--freeze_frame", type=int, default=None,
+                        help="Frame index to freeze (default: middle frame)")
     args = parser.parse_args()
 
     render_point_cloud(
@@ -358,6 +411,10 @@ def main():
         height=args.height,
         point_size=args.point_size,
         fps=args.fps,
+        relative_to_source=args.relative_to_source,
+        rotation_only=args.rotation_only,
+        freeze_repeat=args.freeze_repeat,
+        freeze_frame=args.freeze_frame,
     )
 
 

@@ -53,3 +53,6 @@ dataset:
   traj_txt_path: ./traj/x_y_circle_cycle.txt  # Will be overridden by run_test_pipeline.sh
   relative_to_source: false
   rotation_only: false
+  adaptive_frame: true
+  freeze_repeat: 0
+  freeze_frame: null
