@@ -29,10 +29,8 @@ Download the following model checkpoints into the `checkpoints/` directory:
 
 | Model | Purpose | Source |
 |---|---|---|
-| **InSpatio-World** | v2v inference — 14B (Step 3) | [HuggingFace](https://huggingface.co/inspatio/world) |
 | **InSpatio-World-1.3B** | v2v inference — 1.3B (Step 3) | [HuggingFace](https://huggingface.co/inspatio/world) |
 | **Wan2.1-T2V-1.3B** | Text encoder + VAE + base model for 1.3B (Step 3) | [HuggingFace](https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B) |
-| **Wan2.1-I2V-14B-480P** | Base diffusion model for 14B (Step 3) | [HuggingFace](https://huggingface.co/Wan-AI/Wan2.1-I2V-14B-480P) |
 | **DA3 (Depth-Anything-3)** | Depth estimation (Step 2) | [HuggingFace](https://huggingface.co/depth-anything/DA3NESTED-GIANT-LARGE) |
 | **Florence-2-large** | Video captioning (Step 1) | [HuggingFace](https://huggingface.co/microsoft/Florence-2-large) |
 | **TAEHV** | Speed up (Optional) | [Github](https://github.com/madebyollin/taehv.git) |
@@ -44,12 +42,9 @@ bash scripts/download.sh
 Expected directory structure after downloading:
 ```
 checkpoints/
-├── InSpatio-World/
-│   └── InSpatio-World.safetensors
 ├── InSpatio-World-1.3B/
 │   └── InSpatio-World-1.3B.safetensors
 ├── Wan2.1-T2V-1.3B/
-├── Wan2.1-I2V-14B-480P/
 ├── DA3/
 ├── Florence-2-large/
 └── taehv/
@@ -65,17 +60,9 @@ The full pipeline runs in three steps:
 All steps are wrapped in a single script:
 
 ```bash
-# Using 14B model (default)
 bash run_test_pipeline.sh \
   --input_dir ./test/example \
-  --traj_txt_path ./traj/x_y_circle_cycle.txt
-
-# Using 1.3B model (lighter, faster)
-bash run_test_pipeline.sh \
-  --input_dir ./test/example \
-  --traj_txt_path ./traj/x_y_circle_cycle.txt \
-  --config_path ./configs/inference_1.3b.yaml \
-  --checkpoint_path ./checkpoints/InSpatio-World-1.3B/InSpatio-World-1.3B.safetensors
+  --traj_txt_path ./traj/x_y_circle_cycle.txt 
 ```
 
 ### Quick Start
@@ -188,12 +175,10 @@ bash run_test_pipeline.sh \
   --input_dir ./test/example \
   --traj_txt_path ./traj/x_y_circle_cycle.txt \
   --use_tae \
-  --config_path ./configs/inference_1.3b.yaml  \
-  --checkpoint_path ./checkpoints/InSpatio-World-1.3B/InSpatio-World-1.3B.safetensors \
   --disable_adaptive_frame 
 ```
 
-You can switch from VAE to TAE to accelerate the process. Furthermore, you can use `--compile_dit` to further boost the speed, reaching 24 fps on an H-series NVIDIA GPU（1.3B). However, please note that this operation requires a relatively long warm-up time when triggered for the first time. It is suitable for scenarios where you need to deploy as a service and pursue extreme speed.
+You can switch from VAE to TAE to accelerate the process. Furthermore, you can use `--compile_dit` to further boost the speed, reaching 24 fps on an H-series NVIDIA GPU (1.3B). However, please note that this operation requires a relatively long warm-up time when triggered for the first time. It is suitable for scenarios where you need to deploy as a service and pursue extreme speed.
 
 ## License
 
