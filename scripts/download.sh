@@ -21,7 +21,7 @@ cd Wan2.1-T2V-1.3B && git lfs pull && cd ..
 # --- Download DA3 ---
 # Note: The repository name you provided is depth-anything/DA3NESTED-GIANT-LARGE 
 # To match the directory name DA3, we specify the target folder name directly when cloning
-GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/depth-anything/Depth-Anything-V2-Large DA3
+GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/depth-anything/DA3NESTED-GIANT-LARGE DA3
 cd DA3 && git lfs pull && cd ..
 
 # --- Download Florence-2 ---
