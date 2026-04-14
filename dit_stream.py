@@ -509,5 +509,17 @@ def main():
                 return
 
 
+def shutdown_runtime():
+    try:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
+            print("[SHUTDOWN] Destroyed torch distributed process group", flush=True)
+    except Exception as e:
+        print(f"[SHUTDOWN] destroy_process_group failed: {e}", flush=True)
+
+
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        shutdown_runtime()
