@@ -10,6 +10,8 @@ TRAJ="orbit"
 CONFIG="configs/inference_1.3b.yaml"
 MASTER_PORT=29515
 SKIP_STEPS=""
+COMPILE_DIT=true
+USE_TAE=true
 
 usage() {
     echo "Usage: $0 [OPTIONS]"
@@ -19,7 +21,9 @@ usage() {
     echo "  --traj TRAJ       Trajectory: orbit | zoom (default: orbit)"
     echo "  --skip-step1      Skip Florence-2 captioning"
     echo "  --skip-step2      Skip DA3 depth + point cloud rendering"
-    echo "  --no-restart      Don't stop/restart llama-servers"
+    echo "  --no-restart      Don't stop/restart llama-servers
+  --no-compile      Disable torch.compile (slower but no warmup)
+  --no-tae          Use full VAE instead of TAE"
     echo "  -h, --help        Show this help"
     exit 0
 }
@@ -38,6 +42,8 @@ while [[ $# -gt 0 ]]; do
         --skip-step1) SKIP_STEPS="$SKIP_STEPS --skip_step1"; shift ;;
         --skip-step2) SKIP_STEPS="$SKIP_STEPS --skip_step1 --skip_step2"; shift ;;
         --no-restart) NO_RESTART=true; shift ;;
+        --no-compile) COMPILE_DIT=false; shift ;;
+        --no-tae) USE_TAE=false; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown option: $1"; usage ;;
     esac
@@ -104,7 +110,9 @@ bash run_test_pipeline.sh \\
     --traj_txt_path $TRAJ_FILE \\
     --config_path $CONFIG \\
     --master_port $MASTER_PORT \\
-    $SKIP_STEPS
+    $SKIP_STEPS \
+    $([ "$COMPILE_DIT" = true ] && echo '--compile_dit') \
+    $([ "$USE_TAE" = true ] && echo '--use_tae')
 "
 
 EXIT_CODE=$?

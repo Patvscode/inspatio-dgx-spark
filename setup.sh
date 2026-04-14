@@ -98,6 +98,7 @@ else
         -e TORCH_CUDA_ARCH_LIST="12.1a" \
         -e TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
         -e HF_HUB_ENABLE_HF_TRANSFER=1 \
+    -e TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache \
         -d "$IMAGE" \
         sleep infinity
 fi

@@ -71,6 +71,8 @@ bash run.sh --input ./my_videos --traj orbit
 
 > **Note:** The run script automatically stops any running llama-server processes to free GPU memory, and restarts them after inference completes. InSpatio-World needs ~97GB VRAM for 301-frame inference.
 
+> **Performance:** `torch.compile` + TAE are enabled by default. First run includes a ~5 min one-time kernel compilation warmup (cached for subsequent runs). Use `--no-compile` to skip compilation if you want faster startup at the cost of slower inference.
+
 ## Performance on DGX Spark
 
 | Step | Task | Time | Peak Memory |
@@ -78,7 +80,8 @@ bash run.sh --input ./my_videos --traj orbit
 | 1 | Florence-2 captioning | <1s | ~4GB |
 | 2a | DA3 depth estimation | 75s | 25.5GB |
 | 2b | Point cloud rendering | 14s | ~2GB |
-| 3 | v2v inference (301 frames) | ~5 min | ~97GB |
+| 3 | v2v inference (301 frames) | ~2 min (compiled) | ~97GB |
+| 3 | v2v inference (first run, includes compilation) | ~7 min | ~97GB |
 
 ## Patches Explained
 
