@@ -112,7 +112,11 @@ def write_viewer_status(status, **kwargs):
 
 
 def dit_process_alive(pid=None, cache_ttl=3.0):
-    """Best-effort liveness check for the containerized DiT worker."""
+    """Best-effort liveness check for the containerized DiT worker.
+
+    Treat zombie or pid-reused processes as dead so the viewer does not keep
+    presenting a crashed stream as still live.
+    """
     now = time.time()
     cached_pid = _liveness_cache.get("pid")
     cached_alive = _liveness_cache.get("alive")
@@ -134,8 +138,16 @@ def dit_process_alive(pid=None, cache_ttl=3.0):
 
     alive = False
     try:
+        check_cmd = (
+            f"pid={pid}; "
+            f"if ! kill -0 \"$pid\" 2>/dev/null; then exit 1; fi; "
+            f"state=$(awk '/^State:/ {{print $2}}' /proc/$pid/status 2>/dev/null || true); "
+            f"if [ \"$state\" = \"Z\" ]; then exit 1; fi; "
+            f"cmd=$(tr '\\0' ' ' < /proc/$pid/cmdline 2>/dev/null || true); "
+            f"case \"$cmd\" in *dit_stream.py*) exit 0 ;; *) exit 1 ;; esac"
+        )
         result = subprocess.run(
-            ["docker", "exec", "inspatio-world", "bash", "-lc", f"kill -0 {pid} 2>/dev/null"],
+            ["docker", "exec", "inspatio-world", "bash", "-lc", check_cmd],
             capture_output=True,
             timeout=2,
             check=False,
@@ -158,18 +170,24 @@ def read_status_for_viewer():
     status = read_status()
     ts = status.get("timestamp")
     state = status.get("status", "unknown")
+    previous_state = status.get("previous_status")
+    active_states = {"streaming", "loading_scene", "encoding", "warming_up", "camera_ready", "ready"}
+
+    pid = None
+    try:
+        if os.path.exists(DIT_PID_FILE):
+            with open(DIT_PID_FILE, 'r') as f:
+                pid = f.read().strip()
+    except Exception:
+        pid = None
+
+    if state == "stale" and previous_state in active_states and not dit_process_alive(pid):
+        return write_viewer_status("crashed", previous_status=previous_state, age_seconds=status.get("age_seconds"))
+
     if ts:
         age = time.time() - ts
         if age > 15 and state not in ("stopped", "ended", "unknown", "crashed", "stale"):
-            pid = None
-            try:
-                if os.path.exists(DIT_PID_FILE):
-                    with open(DIT_PID_FILE, 'r') as f:
-                        pid = f.read().strip()
-            except Exception:
-                pid = None
-
-            if state in ("streaming", "loading_scene", "encoding", "warming_up", "camera_ready", "ready") and not dit_process_alive(pid):
+            if state in active_states and not dit_process_alive(pid):
                 status = write_viewer_status("crashed", previous_status=state, age_seconds=round(age, 1))
             else:
                 status = write_viewer_status("stale", previous_status=state, age_seconds=round(age, 1))
