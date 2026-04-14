@@ -132,17 +132,36 @@ def stop_dit_stream():
 
     if pid:
         try:
+            stop_cmd = (
+                f"if kill -0 {pid} 2>/dev/null; then "
+                f"kill -TERM {pid} 2>/dev/null || true; "
+                f"for _ in $(seq 1 16); do "
+                f"kill -0 {pid} 2>/dev/null || break; "
+                f"sleep 0.5; "
+                f"done; "
+                f"if kill -0 {pid} 2>/dev/null; then kill -KILL {pid} 2>/dev/null || true; fi; "
+                f"fi; "
+                f"rm -f /workspace/inspatio-world/interactive_io/dit_stream.pid"
+            )
             subprocess.run(
-                ["docker", "exec", "inspatio-world", "bash", "-lc", f"kill -TERM {pid} || true; sleep 1; kill -KILL {pid} || true; rm -f /workspace/inspatio-world/interactive_io/dit_stream.pid"],
-                timeout=10,
+                ["docker", "exec", "inspatio-world", "bash", "-lc", stop_cmd],
+                timeout=15,
                 capture_output=True,
             )
         except Exception:
             pass
     else:
         try:
-            subprocess.run(["docker", "exec", "inspatio-world", "bash", "-c", "pkill -9 -f dit_stream"],
-                           timeout=10, capture_output=True)
+            subprocess.run(
+                [
+                    "docker", "exec", "inspatio-world", "bash", "-lc",
+                    "pkill -TERM -f dit_stream || true; "
+                    "for _ in $(seq 1 16); do pgrep -f dit_stream >/dev/null || break; sleep 0.5; done; "
+                    "pgrep -f dit_stream >/dev/null && pkill -KILL -f dit_stream || true"
+                ],
+                timeout=15,
+                capture_output=True,
+            )
         except Exception:
             pass
 

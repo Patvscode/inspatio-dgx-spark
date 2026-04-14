@@ -16,6 +16,7 @@ Usage (from host):
 import gc
 import json
 import os
+import signal
 import sys
 import time
 
@@ -60,6 +61,16 @@ torch.cuda.set_device(0)
 
 device = torch.device("cuda")
 set_seed(42)
+
+
+def handle_shutdown_signal(signum, frame):
+    print(f"[SHUTDOWN] Signal {signum} received, exiting gracefully", flush=True)
+    raise SystemExit(0)
+
+
+signal.signal(signal.SIGTERM, handle_shutdown_signal)
+signal.signal(signal.SIGINT, handle_shutdown_signal)
+
 
 def write_status(status, **kwargs):
     data = {"status": status, "timestamp": time.time(), **kwargs}
