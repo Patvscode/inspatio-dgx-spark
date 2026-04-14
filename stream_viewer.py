@@ -347,7 +347,13 @@ HTML_PAGE = r"""<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>InSpatio</title>
+<script>/* Block any external service workers on this origin */
+if('serviceWorker' in navigator){navigator.serviceWorker.getRegistrations().then(r=>r.forEach(w=>w.unregister()));}
+</script>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 
@@ -862,7 +868,15 @@ function connect(){
   S.ws.onopen=()=>{
     setStatus('live','streaming');
     S.stopped=false;
-    if(!S.gotFirstFrame){el.loading.classList.add('visible');el.loadingText.textContent='Connecting to stream...';}
+    // On reconnect after tab suspend, reset frame tracking so glob fallback finds current frames
+    if(S.gotFirstFrame){
+      // We had frames before — this is a reconnect. Show brief "Resuming..." then frames will flow
+      el.loading.classList.add('visible');el.loadingText.textContent='Resuming...';
+      // Force server to rescan frames by sending a ping
+      setTimeout(()=>send({action:'resync'}),200);
+    } else {
+      el.loading.classList.add('visible');el.loadingText.textContent='Connecting to stream...';
+    }
     startTimer();
   };
 
@@ -877,6 +891,8 @@ function connect(){
       const now=Date.now(),dt=(now-S.lastFT)/1000;
       if(dt>0&&dt<2){const f=1/dt;S.fpsSm=S.fpsSm*0.85+f*0.15;el.fpsChip.textContent=S.fpsSm.toFixed(1)+' FPS';}
       S.lastFT=now;
+      // Apply right joystick viewport transform
+      applyViewport();
     }
 
     if(d.type==='status'){
@@ -1114,8 +1130,35 @@ class Joystick{
 let _mx=0,_my=0,_lx=0,_ly=0,_pd=false;
 setInterval(()=>{if(!_pd)return;_pd=false;send({action:'pose',moveX:Math.round(_mx*100)/100,moveY:Math.round(_my*100)/100,lookX:Math.round(_lx*100)/100,lookY:Math.round(_ly*100)/100});},50);
 
-const jL=new Joystick('joyL','knobL',(x,y)=>{_mx=x;_my=y;_pd=true;});
-const jR=new Joystick('joyR','knobR',(x,y)=>{_lx=x;_ly=y;_pd=true;});
+// Viewport state for right joystick
+let vpX=0,vpY=0,vpZoom=1.0;
+
+function applyViewport(){
+  // Right joystick: X=pan, Y=zoom
+  const tx=vpX*80; // max 80px pan
+  const ty=vpY*50; // max 50px pan
+  const sc=vpZoom;
+  el.vid.style.transform=`scale(${sc}) translate(${tx}px,${ty}px)`;
+  el.vid.style.transformOrigin='center center';
+}
+
+let _speedThrottle=null;
+const jL=new Joystick('joyL','knobL',(x,y)=>{
+  _mx=x;_my=y;_pd=true;
+  // Throttle speed updates to every 100ms
+  if(!_speedThrottle){
+    _speedThrottle=setTimeout(()=>{_speedThrottle=null;},100);
+    send({action:'speed',speedY:-y,speedX:x});
+  }
+});
+const jR=new Joystick('joyR','knobR',(x,y)=>{
+  _lx=x;_ly=y;_pd=true;
+  // Right joystick: X=pan left/right, Y=zoom in/out
+  vpX=x;
+  vpZoom=1.0+(-y*0.5); // push up = zoom in (1.5x), pull down = zoom out (0.5x)
+  vpZoom=Math.max(0.5,Math.min(2.0,vpZoom));
+  applyViewport();
+});
 
 // ═══ Init ═══
 el.loading.classList.add('visible');
@@ -1203,9 +1246,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
     last_frame_idx = -1
     paused = False
+    frame_speed = 1  # 1=normal, >1=fast forward, <0=reverse
+    frame_jump = 0   # instant frame offset from left joystick X
 
     async def receive_commands():
-        nonlocal paused
+        nonlocal paused, last_frame_idx, frame_speed, frame_jump
         global recording, recorded_frames
         while True:
             try:
@@ -1293,6 +1338,28 @@ async def websocket_endpoint(websocket: WebSocket):
                         lookX=msg.get("lookX", 0), lookY=msg.get("lookY", 0),
                     )
 
+                elif action == "speed":
+                    # Left joystick controls playback speed/direction
+                    nonlocal frame_speed, frame_jump
+                    sy = msg.get("speedY", 0)  # -1 to 1: negative=reverse, positive=forward
+                    sx = msg.get("speedX", 0)
+                    # Map joystick to speed: center=1x, up=5x, down=-2x (reverse)
+                    if abs(sy) < 0.1:
+                        frame_speed = 1  # normal
+                    elif sy > 0:
+                        frame_speed = 1 + int(sy * 8)  # 1-9x forward
+                    else:
+                        frame_speed = min(-1, int(sy * 4))  # -1 to -4x reverse
+                    # X axis: instant jump
+                    if abs(sx) > 0.5:
+                        frame_jump = int(sx * 50)  # jump up to 50 frames
+                    else:
+                        frame_jump = 0
+
+                elif action == "resync":
+                    nonlocal last_frame_idx
+                    last_frame_idx = -1
+
                 elif action == "toggle_gpu":
                     if session_state["servers_stopped"]:
                         restore_llama_servers()
@@ -1313,64 +1380,69 @@ async def websocket_endpoint(websocket: WebSocket):
     asyncio.create_task(receive_commands())
 
     # Instead of globbing 1000s of files every tick, probe sequentially
-    no_frame_count = 0  # track consecutive misses to detect scene switch
+    # Frame delivery loop — simple and fast
     while True:
         await asyncio.sleep(0.05)
 
         if paused:
             continue
 
-        # Probe for next frame(s) — skip ahead if we fell behind
-        found = False
-        probe_idx = last_frame_idx + 1
-        attempts = 0
-        while attempts < 100:  # skip up to 100 frames if we fell behind
-            path = os.path.join(FRAMES_DIR, f"frame_{probe_idx:06d}.jpg")
-            if os.path.exists(path):
-                found = True
-                probe_idx += 1
-                attempts = 0  # reset since we found one
-            else:
-                attempts += 1
-                probe_idx += 1
+        # On first connect or after resync, find the latest frame via status.json
+        if last_frame_idx == -1:
+            try:
+                with open(STATUS_FILE, 'r') as f:
+                    st = json.load(f)
+                frame_num = st.get("frame", 0)
+                if frame_num > 0:
+                    last_frame_idx = max(0, frame_num - 3)  # start a few behind latest
+            except Exception:
+                pass
+            # Fallback: check if frame 0 exists
+            if last_frame_idx == -1:
+                if os.path.exists(os.path.join(FRAMES_DIR, "frame_000000.jpg")):
+                    last_frame_idx = -1  # will probe from 0
+                else:
+                    continue  # no frames yet
 
-        if not found:
-            no_frame_count += 1
-            # After 2 seconds of no frames (40 ticks), do a glob to find where frames are
-            # This handles: initial connect, scene switches (frames restart at 0), loops
-            if no_frame_count >= 40:
-                no_frame_count = 0
+        # Apply speed/jump from left joystick
+        step = max(1, abs(frame_speed)) if frame_speed >= 0 else -1
+        if frame_jump != 0:
+            last_frame_idx = max(0, last_frame_idx + frame_jump)
+            frame_jump = 0  # consume the jump
+
+        if frame_speed < 0:
+            # Reverse: go backward
+            next_idx = max(0, last_frame_idx - abs(frame_speed))
+        else:
+            next_idx = last_frame_idx + step
+
+        next_path = os.path.join(FRAMES_DIR, f"frame_{next_idx:06d}.jpg")
+
+        if not os.path.exists(next_path):
+            # Maybe DiT looped and frames restarted at 0
+            if next_idx > 100 and os.path.exists(os.path.join(FRAMES_DIR, "frame_000000.jpg")):
+                # Check if status.json shows a lower frame number (loop detected)
                 try:
-                    some = glob.glob(os.path.join(FRAMES_DIR, "frame_*.jpg"))
-                    if some:
-                        idxs = [int(os.path.basename(f).split('_')[1].split('.')[0]) for f in some[-50:]]
-                        max_idx = max(idxs)
-                        if max_idx != last_frame_idx:
-                            probe_idx = max_idx
-                            found = True
+                    with open(STATUS_FILE, 'r') as f:
+                        st = json.load(f)
+                    current_frame = st.get("frame", next_idx)
+                    if current_frame < last_frame_idx - 10:
+                        last_frame_idx = max(0, current_frame - 3)
                 except Exception:
                     pass
-            if not found:
-                continue
-        else:
-            no_frame_count = 0
-
-        # Send the latest frame we found
-        target_idx = probe_idx - 1  # last successful probe
-        if target_idx <= last_frame_idx:
             continue
 
-        target_path = os.path.join(FRAMES_DIR, f"frame_{target_idx:06d}.jpg")
+        # Read and send
         try:
-            with open(target_path, 'rb') as f:
+            with open(next_path, 'rb') as f:
                 frame_bytes = f.read()
             if len(frame_bytes) < 100:  # incomplete write
                 continue
             b64 = base64.b64encode(frame_bytes).decode('ascii')
-            await websocket.send_json({"type": "frame", "data": b64, "frame": target_idx})
-            last_frame_idx = target_idx
+            await websocket.send_json({"type": "frame", "data": b64, "frame": next_idx})
+            last_frame_idx = next_idx
             if recording:
-                recorded_frames.append(target_path)
+                recorded_frames.append(next_path)
         except Exception:
             continue
 
@@ -1396,9 +1468,52 @@ async def stitch_and_send(websocket):
 
 
 if __name__ == "__main__":
+    import signal
+
     os.makedirs(THUMBS_DIR, exist_ok=True)
+
+    # ── Kill any existing viewer instances (prevents zombie accumulation) ──
+    my_pid = os.getpid()
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "stream_viewer.py"],
+            capture_output=True, text=True, timeout=5
+        )
+        for pid_str in result.stdout.strip().split('\n'):
+            if pid_str.strip():
+                pid = int(pid_str.strip())
+                if pid != my_pid:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        print(f"[CLEANUP] Killed stale viewer PID {pid}")
+                    except ProcessLookupError:
+                        pass
+    except Exception:
+        pass
+
+    # Also free the port if something else holds it
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{PORT}"],
+            capture_output=True, text=True, timeout=5
+        )
+        for pid_str in result.stdout.strip().split('\n'):
+            if pid_str.strip():
+                pid = int(pid_str.strip())
+                if pid != my_pid:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                        print(f"[CLEANUP] Killed port holder PID {pid}")
+                    except ProcessLookupError:
+                        pass
+    except Exception:
+        pass
+
+    time.sleep(0.5)  # let OS release the port
+
     print(f"\n{'='*50}")
     print(f"  InSpatio-World Viewer v3")
     print(f"  http://100.109.173.109:{PORT}")
+    print(f"  PID: {my_pid}")
     print(f"{'='*50}\n")
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")
