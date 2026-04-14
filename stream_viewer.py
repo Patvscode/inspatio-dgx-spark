@@ -153,6 +153,43 @@ def stop_dit_stream():
         pass
 
 
+def scene_artifact_paths(name: str):
+    return {
+        "mp4": os.path.join(USER_INPUT, name + '.mp4'),
+        "mov": os.path.join(USER_INPUT, name + '.mov'),
+        "avi": os.path.join(USER_INPUT, name + '.avi'),
+        "MOV": os.path.join(USER_INPUT, name + '.MOV'),
+        "thumb": os.path.join(THUMBS_DIR, name + '.jpg'),
+        "vggt": os.path.join(USER_INPUT, 'new_vggt', name),
+        "tmp": os.path.join(USER_INPUT, 'new_vggt', name + '_da3_tmp'),
+    }
+
+
+def clear_scene_artifacts(name: str, keep_video: bool = False, keep_thumb: bool = False):
+    paths = scene_artifact_paths(name)
+    for key, path in paths.items():
+        if keep_video and key in ('mp4', 'mov', 'avi', 'MOV'):
+            continue
+        if keep_thumb and key == 'thumb':
+            continue
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            elif os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+
+
+def sanitize_upload_name(filename: str) -> str:
+    base = os.path.basename(filename or 'upload.mp4').strip()
+    safe = ''.join(ch if ch.isalnum() or ch in ('-', '_', '.') else '_' for ch in base)
+    safe = safe.replace(' ', '_')
+    while '__' in safe:
+        safe = safe.replace('__', '_')
+    return safe or 'upload.mp4'
+
+
 def get_available_scenes():
     scenes = []
     seen_names = set()
@@ -162,29 +199,26 @@ def get_available_scenes():
         name = f.rsplit('.', 1)[0]
         if name in seen_names:
             continue
-        mp4_path = os.path.join(USER_INPUT, name + '.mp4')
-        if os.path.exists(mp4_path):
+        paths = scene_artifact_paths(name)
+        if os.path.exists(paths['mp4']):
             f = name + '.mp4'
         seen_names.add(name)
-        thumb_path = os.path.join(THUMBS_DIR, name + '.jpg')
-        # Check processing status
-        render_dir = os.path.join(USER_INPUT, "new_vggt", name, "render")
+        render_dir = os.path.join(paths['vggt'], 'render')
         has_render = os.path.exists(render_dir) and len(os.listdir(render_dir)) > 0 if os.path.exists(render_dir) else False
-        has_vggt = os.path.exists(os.path.join(USER_INPUT, "new_vggt", name))
-        # File size
-        vid_path = os.path.join(USER_INPUT, f)
+        has_vggt = os.path.exists(paths['vggt'])
+        has_tmp = os.path.exists(paths['tmp'])
         try:
-            size_mb = os.path.getsize(vid_path) / (1024 * 1024)
+            size_mb = os.path.getsize(os.path.join(USER_INPUT, f)) / (1024 * 1024)
         except Exception:
             size_mb = 0
         scenes.append({
-            "name": name,
-            "file": f,
-            "has_thumb": os.path.exists(thumb_path),
-            "processed": has_render,
-            "partially_processed": has_vggt and not has_render,
-            "size_mb": round(size_mb, 1),
-            "is_processing": session_state.get("processing_scene") == f,
+            'name': name,
+            'file': f,
+            'has_thumb': os.path.exists(paths['thumb']),
+            'processed': has_render,
+            'partially_processed': (has_vggt or has_tmp) and not has_render,
+            'size_mb': round(size_mb, 1),
+            'is_processing': session_state.get('processing_scene') == f,
         })
     return scenes
 
@@ -303,16 +337,15 @@ def process_scene_background(video_file, progress_queue):
         subprocess.run(["docker", "start", "inspatio-world"], timeout=10, capture_output=True)
         time.sleep(1)
 
-        # Check if already preprocessed — skip pipeline if render data exists
         render_dir = os.path.join(USER_INPUT, "new_vggt", video_name, "render")
         if os.path.exists(render_dir) and len(os.listdir(render_dir)) > 0:
             status("Scene already preprocessed — skipping pipeline")
-            # Point the runtime at this exact scene, preserving known caption text when possible
             update_active_scene_json(video_file)
-            # Skip straight to DiT restart (below the pipeline steps)
-            # Jump to restart section
             _do_restart_dit(video_file, video_name, status, progress_queue)
             return
+
+        # Fresh first-time processing: clear stale partial outputs before starting.
+        clear_scene_artifacts(video_name, keep_video=True, keep_thumb=True)
 
         # Step 1: Florence-2 caption
         status("Step 1/3: Captioning with Florence-2...")
@@ -371,6 +404,7 @@ def process_scene_background(video_file, progress_queue):
             err = (result.stderr or result.stdout)[-200:]
             status(f"Depth failed: {err}")
             progress_queue.put({"type": "toast", "message": "❌ Depth estimation failed", "done": True, "error": True})
+            clear_scene_artifacts(video_name, keep_video=True, keep_thumb=True)
             session_state["processing_scene"] = None
             return
 
@@ -394,6 +428,7 @@ def process_scene_background(video_file, progress_queue):
             err = (result.stderr or result.stdout)[-200:]
             status(f"Render failed: {err}")
             progress_queue.put({"type": "toast", "message": "❌ Rendering failed", "done": True, "error": True})
+            clear_scene_artifacts(video_name, keep_video=True, keep_thumb=True)
             session_state["processing_scene"] = None
             return
 
@@ -402,6 +437,7 @@ def process_scene_background(video_file, progress_queue):
 
     except Exception as e:
         print(f"[SCENE] Error: {e}", flush=True)
+        clear_scene_artifacts(video_name, keep_video=True, keep_thumb=True)
         progress_queue.put({"type": "toast", "message": f"❌ Error: {str(e)[:80]}", "done": True, "error": True})
         session_state["processing_scene"] = None
 
@@ -1521,17 +1557,23 @@ async def get_thumbnail(name: str):
 @app.post("/upload_video")
 async def upload_video(file: UploadFile = File(...)):
     try:
-        safe_name = file.filename.replace(' ', '_').replace('(', '').replace(')', '')
-        dest = os.path.join(USER_INPUT, safe_name)
+        safe_name = sanitize_upload_name(file.filename)
+        stem = safe_name.rsplit('.', 1)[0]
         content = await file.read()
+        if not content:
+            return JSONResponse({"detail": "Empty upload"}, status_code=400)
+
+        clear_scene_artifacts(stem, keep_video=False, keep_thumb=False)
+
+        dest = os.path.join(USER_INPUT, safe_name)
         with open(dest, 'wb') as f:
             f.write(content)
         size_mb = len(content) / (1024 * 1024)
         print(f"[UPLOAD] {safe_name} ({size_mb:.1f} MB)")
-        
+
         # Convert non-mp4 to mp4 (pipeline only reads .mp4)
         if not safe_name.lower().endswith('.mp4'):
-            mp4_name = safe_name.rsplit('.', 1)[0] + '.mp4'
+            mp4_name = stem + '.mp4'
             mp4_dest = os.path.join(USER_INPUT, mp4_name)
             print(f"[UPLOAD] Converting {safe_name} -> {mp4_name}")
             conv = subprocess.run([
@@ -1544,20 +1586,23 @@ async def upload_video(file: UploadFile = File(...)):
                 dest = mp4_dest
                 print(f"[UPLOAD] Converted to mp4")
             else:
-                print(f"[UPLOAD] Conversion failed, keeping original")
-        
-        thumb = os.path.join(THUMBS_DIR, safe_name.rsplit('.', 1)[0] + '.jpg')
+                err = (conv.stderr or conv.stdout or b'')[-200:]
+                return JSONResponse({"detail": f"Video conversion failed: {err.decode('utf-8', 'ignore')}"}, status_code=500)
+
+        thumb = os.path.join(THUMBS_DIR, stem + '.jpg')
+        thumb_ok = False
         try:
-            subprocess.run(["ffmpeg", "-y", "-i", dest, "-ss", "0.5",
-                            "-vframes", "1", "-vf", "scale=160:-1", thumb],
-                           capture_output=True, timeout=10)
+            thumb_res = subprocess.run(["ffmpeg", "-y", "-i", dest, "-ss", "0.5",
+                                        "-vframes", "1", "-vf", "scale=160:-1", thumb],
+                                       capture_output=True, timeout=20)
+            thumb_ok = thumb_res.returncode == 0 and os.path.exists(thumb)
         except Exception:
-            pass
-        return {"message": f"Uploaded {safe_name} ({size_mb:.1f} MB)"}
+            thumb_ok = False
+        return {"message": f"Uploaded {safe_name} ({size_mb:.1f} MB)", "file": safe_name, "thumbnail": thumb_ok}
     except PermissionError:
         return JSONResponse({"detail": "Permission denied"}, status_code=500)
     except Exception as e:
-        return JSONResponse({"detail": str(e)[:100]}, status_code=500)
+        return JSONResponse({"detail": str(e)[:200]}, status_code=500)
 
 
 @app.get("/api/library")
@@ -1584,11 +1629,15 @@ async def delete_video(name: str):
         if os.path.exists(path):
             os.remove(path)
             deleted.append(name + ext)
-    # Delete preprocessed data
+    # Delete preprocessed data (full + partial temp)
     vggt_dir = os.path.join(USER_INPUT, "new_vggt", name)
     if os.path.exists(vggt_dir):
         shutil.rmtree(vggt_dir, ignore_errors=True)
         deleted.append(f"new_vggt/{name}/")
+    tmp_dir = os.path.join(USER_INPUT, "new_vggt", name + '_da3_tmp')
+    if os.path.exists(tmp_dir):
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        deleted.append(f"new_vggt/{name}_da3_tmp/")
     # Delete thumbnail
     thumb = os.path.join(THUMBS_DIR, name + '.jpg')
     if os.path.exists(thumb):
