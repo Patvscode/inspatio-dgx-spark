@@ -265,6 +265,7 @@ def _do_restart_dit(video_file, video_name, status, progress_queue):
 
     dit_cmd = (
         "cd /workspace/inspatio-world && "
+        "INSPATIO_USE_TORCH_COMPILE=0 "
         "TORCH_CUDA_ARCH_LIST=12.1a "
         "TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas "
         "TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache "
@@ -1175,8 +1176,7 @@ function toggleRecord(){
 
 function resetView(){
   S.resetToken=Date.now();
-  vpX=0;vpY=0;vpZoom=1.0;
-  applyViewport();
+  vpZoom=1.0;
   send({action:'reset',resetToken:S.resetToken});
 }
 
@@ -1412,28 +1412,16 @@ setInterval(()=>{
   });
 },50);
 
-// Viewport state for right joystick
-let vpX=0,vpY=0,vpZoom=1.0;
-
-function applyViewport(){
-  // Right joystick: X=pan, Y=zoom
-  const tx=vpX*80; // max 80px pan
-  const ty=vpY*50; // max 50px pan
-  const sc=vpZoom;
-  el.vid.style.transform=`scale(${sc}) translate(${tx}px,${ty}px)`;
-  el.vid.style.transformOrigin='center center';
-}
+// Backend-driven camera only. Keep client viewport visually honest.
+let vpZoom=1.0;
 
 const jL=new Joystick('joyL','knobL',(x,y)=>{
   _mx=x;_my=y;_pd=true;
 });
 const jR=new Joystick('joyR','knobR',(x,y)=>{
   _lx=x;_ly=y;_pd=true;
-  // Right joystick also drives a local viewport preview so control feel is immediate
-  vpX=x;
   vpZoom=1.0+(-y*0.5);
   vpZoom=Math.max(0.5,Math.min(2.0,vpZoom));
-  applyViewport();
 });
 
 // ═══ Init ═══

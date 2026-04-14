@@ -163,41 +163,41 @@ def main():
             bc['k'].detach_().zero_()
             bc['v'].detach_().zero_()
     
-    # ── Compile DiT ──
-    write_status("compiling_dit")
-    import torch._inductor.config as ic
-    ic.fx_graph_cache = True
-    torch._dynamo.config.cache_size_limit = 32
-    cache_dir = "/dev/shm/torchinductor_stream"
-    os.makedirs(cache_dir, exist_ok=True)
-    os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
-    
-    pipeline.generator.model = torch.compile(
-        pipeline.generator.model,
-        mode="max-autotune",
-        fullgraph=False,
-        dynamic=False,
-        backend="inductor",
-    )
-    print("DiT compiled.", flush=True)
-    
-    # ── DiT warmup ──
-    write_status("warming_up")
-    F_warmup = num_frame_per_block
-    # Latent dims: resolution / 8
+    # ── Optional DiT compile ──
     lat_h, lat_w = init_h // 8, init_w // 8
-    print(f"Latent dims: {lat_h}x{lat_w} (from {init_h}x{init_w})", flush=True)
-    
-    dummy_noise = torch.randn(1, F_warmup, 16, lat_h, lat_w, device=device, dtype=torch.bfloat16)
-    dummy_render = torch.randn(1, F_warmup, 20, lat_h, lat_w, device=device, dtype=torch.bfloat16)
-    dummy_cond = {"prompt_embeds": torch.randn(1, 512, 4096, device=device, dtype=torch.bfloat16)}
-    
-    warmup_sizes = [3, 6]
-    for wi, n_ctx in enumerate(warmup_sizes):
-        kv_size = n_ctx * (lat_h * lat_w)
-        dummy_ctx = torch.randn(1, n_ctx, 36, lat_h, lat_w, device=device, dtype=torch.bfloat16)
-        print(f"  Compile warmup {wi+1}/{len(warmup_sizes)} (kv_size={kv_size})...", flush=True)
-        for _ in range(3):
+    use_torch_compile = os.environ.get("INSPATIO_USE_TORCH_COMPILE", "0").lower() in ("1", "true", "yes")
+    if use_torch_compile:
+        write_status("compiling_dit")
+        import torch._inductor.config as ic
+        ic.fx_graph_cache = True
+        torch._dynamo.config.cache_size_limit = 32
+        cache_dir = "/dev/shm/torchinductor_stream"
+        os.makedirs(cache_dir, exist_ok=True)
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = cache_dir
+
+        pipeline.generator.model = torch.compile(
+            pipeline.generator.model,
+            mode="reduce-overhead",
+            fullgraph=False,
+            dynamic=False,
+            backend="inductor",
+        )
+        print("DiT compiled.", flush=True)
+
+        # ── DiT warmup ──
+        write_status("warming_up")
+        F_warmup = num_frame_per_block
+        print(f"Latent dims: {lat_h}x{lat_w} (from {init_h}x{init_w})", flush=True)
+
+        dummy_noise = torch.randn(1, F_warmup, 16, lat_h, lat_w, device=device, dtype=torch.bfloat16)
+        dummy_render = torch.randn(1, F_warmup, 20, lat_h, lat_w, device=device, dtype=torch.bfloat16)
+        dummy_cond = {"prompt_embeds": torch.randn(1, 512, 4096, device=device, dtype=torch.bfloat16)}
+
+        warmup_sizes = [3]
+        for wi, n_ctx in enumerate(warmup_sizes):
+            kv_size = n_ctx * (lat_h * lat_w)
+            dummy_ctx = torch.randn(1, n_ctx, 36, lat_h, lat_w, device=device, dtype=torch.bfloat16)
+            print(f"  Compile warmup {wi+1}/{len(warmup_sizes)} (kv_size={kv_size})...", flush=True)
             reset_kv_cache()
             denoise_block(
                 pipeline.generator, pipeline.scheduler, dummy_noise, dummy_cond,
@@ -206,14 +206,18 @@ def main():
                 render_block=dummy_render, denoising_kv_size=kv_size,
                 denoising_steps=pipeline.denoising_step_list,
             )
-        torch.cuda.synchronize()
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            gc.collect()
+
+        del dummy_noise, dummy_render, dummy_cond
         torch.cuda.empty_cache()
         gc.collect()
-    
-    del dummy_noise, dummy_render, dummy_cond
-    torch.cuda.empty_cache()
-    gc.collect()
-    reset_kv_cache()
+        reset_kv_cache()
+    else:
+        write_status("warming_up", message="Skipping Torch compile for faster startup")
+        print(f"Latent dims: {lat_h}x{lat_w} (from {init_h}x{init_w})", flush=True)
+        print("[STARTUP] INSPATIO_USE_TORCH_COMPILE=0, skipping torch.compile warmup for faster first frame", flush=True)
     
     write_status("ready", message="Model loaded. Waiting for scene data.")
     print("="*60, flush=True)
