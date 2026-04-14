@@ -28,6 +28,7 @@ POSE_FILE = os.path.join(IO_DIR, "pose.json")
 RECORD_DIR = os.path.join(IO_DIR, "recording")
 THUMBS_DIR = os.path.join(IO_DIR, "thumbnails")
 USER_INPUT = os.path.join(HOST_DIR, "user_input")
+DIT_PID_FILE = os.path.join(IO_DIR, "dit_stream.pid")
 PORT = 7861
 
 app = FastAPI()
@@ -36,13 +37,46 @@ app = FastAPI()
 session_state = {
     "paused": False,
     "running": True,
-    "timer_end": None,
-    "timer_minutes": 60,
+    "timer_end": None,       # epoch timestamp when session expires (server-side)
+    "timer_minutes": 60,     # current timer setting
+    "timer_started": None,   # epoch when timer was started
     "servers_stopped": True,
     "recording": False,
-    "active_scene": None,  # set at startup from new.json
+    "active_scene": None,    # set at startup from new.json
     "processing_scene": None,
+    "scene_generation": 0,   # increments on each scene switch to signal frame reset
+    "quality": "scout",
+    "steps": 2,
 }
+
+
+def start_server_timer(minutes):
+    """Start or restart the server-side session timer."""
+    session_state["timer_minutes"] = minutes
+    if minutes <= 0:
+        session_state["timer_end"] = None
+        session_state["timer_started"] = None
+    else:
+        now = time.time()
+        session_state["timer_end"] = now + minutes * 60
+        session_state["timer_started"] = now
+
+
+def get_timer_remaining():
+    """Get seconds remaining on server timer. Returns -1 for infinite."""
+    if session_state["timer_end"] is None:
+        return -1
+    remaining = session_state["timer_end"] - time.time()
+    return max(0, remaining)
+
+
+def end_session_cleanup():
+    """Clean up when session ends (stop or timer expiry). Restores llama servers."""
+    print("[SESSION] Ending session, restoring services...", flush=True)
+    stop_dit_stream()
+    restore_llama_servers()
+    session_state["running"] = False
+    session_state["timer_end"] = None
 
 
 def write_pose(**kwargs):
@@ -87,14 +121,34 @@ def stop_dit_stream():
     write_pose(stop=True)
     session_state["running"] = False
     time.sleep(2)
-    # Kill inside Docker container (host-side pkill can't reach it)
+
+    pid = None
     try:
-        subprocess.run(["docker", "exec", "inspatio-world", "bash", "-c", "pkill -9 -f dit_stream"],
-                       timeout=10, capture_output=True)
+        if os.path.exists(DIT_PID_FILE):
+            with open(DIT_PID_FILE, 'r') as f:
+                pid = f.read().strip()
     except Exception:
-        pass
+        pid = None
+
+    if pid:
+        try:
+            subprocess.run(
+                ["docker", "exec", "inspatio-world", "bash", "-lc", f"kill -TERM {pid} || true; sleep 1; kill -KILL {pid} || true; rm -f /workspace/inspatio-world/interactive_io/dit_stream.pid"],
+                timeout=10,
+                capture_output=True,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            subprocess.run(["docker", "exec", "inspatio-world", "bash", "-c", "pkill -9 -f dit_stream"],
+                           timeout=10, capture_output=True)
+        except Exception:
+            pass
+
     try:
-        subprocess.run(["pkill", "-f", "dit_stream.py"], timeout=5, capture_output=True)
+        if os.path.exists(DIT_PID_FILE):
+            os.remove(DIT_PID_FILE)
     except Exception:
         pass
 
@@ -106,20 +160,31 @@ def get_available_scenes():
         if not f.endswith(('.mp4', '.mov', '.avi', '.MOV')):
             continue
         name = f.rsplit('.', 1)[0]
-        # Skip .mov/.avi if an .mp4 version exists (dedup after conversion)
         if name in seen_names:
             continue
-        # Prefer .mp4 if both exist
         mp4_path = os.path.join(USER_INPUT, name + '.mp4')
         if os.path.exists(mp4_path):
             f = name + '.mp4'
         seen_names.add(name)
         thumb_path = os.path.join(THUMBS_DIR, name + '.jpg')
+        # Check processing status
+        render_dir = os.path.join(USER_INPUT, "new_vggt", name, "render")
+        has_render = os.path.exists(render_dir) and len(os.listdir(render_dir)) > 0 if os.path.exists(render_dir) else False
+        has_vggt = os.path.exists(os.path.join(USER_INPUT, "new_vggt", name))
+        # File size
+        vid_path = os.path.join(USER_INPUT, f)
+        try:
+            size_mb = os.path.getsize(vid_path) / (1024 * 1024)
+        except Exception:
+            size_mb = 0
         scenes.append({
             "name": name,
             "file": f,
             "has_thumb": os.path.exists(thumb_path),
-            "processed": os.path.exists(os.path.join(USER_INPUT, "new_vggt", name)),
+            "processed": has_render,
+            "partially_processed": has_vggt and not has_render,
+            "size_mb": round(size_mb, 1),
+            "is_processing": session_state.get("processing_scene") == f,
         })
     return scenes
 
@@ -143,10 +208,43 @@ def generate_thumbnails():
             pass
 
 
+def build_scene_entry(video_file, video_name, text=None):
+    return {
+        "video_path": f"./user_input/{video_file}",
+        "vggt_depth_path": f"./user_input/new_vggt/{video_name}",
+        "vggt_extrinsics_path": f"./user_input/new_vggt/{video_name}/extrinsics.txt",
+        "radius_ratio": 1,
+        "text": text or "A video scene.",
+    }
+
+
+def update_active_scene_json(video_file, text=None):
+    video_name = video_file.rsplit('.', 1)[0]
+    json_path = os.path.join(USER_INPUT, "new.json")
+    existing_text = text
+    try:
+        if os.path.exists(json_path):
+            with open(json_path, 'r') as f:
+                entries = json.load(f)
+            for entry in entries:
+                vp = os.path.basename(entry.get("video_path", ""))
+                if vp == video_file and entry.get("text"):
+                    existing_text = entry.get("text")
+                    break
+    except Exception:
+        pass
+
+    entry = build_scene_entry(video_file, video_name, existing_text)
+    with open(json_path, 'w') as f:
+        json.dump([entry], f, indent=2)
+    return entry
+
+
 def _do_restart_dit(video_file, video_name, status, progress_queue):
     """Restart DiT stream with a scene that's already preprocessed."""
     status("Starting stream with new scene...")
     session_state["active_scene"] = video_file
+    session_state["scene_generation"] += 1
 
     # Clean frames
     try:
@@ -155,18 +253,26 @@ def _do_restart_dit(video_file, video_name, status, progress_queue):
     except Exception:
         pass
 
-    write_pose(yaw=0, pitch=0, zoom=1.0, paused=False, stop=False)
+    write_pose(yaw=0, pitch=0, zoom=1.0, moveX=0, moveY=0, lookX=0, lookY=0, paused=False, stop=False, resetToken=time.time())
+
+    # Write current quality settings so dit_stream picks them up
+    try:
+        quality_path = os.path.join(IO_DIR, "quality.json")
+        with open(quality_path, 'w') as f:
+            json.dump({"quality": session_state.get("quality", "scout"), "steps": session_state.get("steps", 2)}, f)
+    except Exception:
+        pass
 
     dit_cmd = (
         "cd /workspace/inspatio-world && "
         "TORCH_CUDA_ARCH_LIST=12.1a "
         "TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas "
         "TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache "
-        "python3 dit_stream.py"
+        "python3 dit_stream.py > /workspace/inspatio-world/interactive_io/dit_stream.log 2>&1 & echo $! > /workspace/inspatio-world/interactive_io/dit_stream.pid"
     )
-    subprocess.Popen(
-        ["docker", "exec", "inspatio-world", "bash", "-c", dit_cmd],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True
+    subprocess.run(
+        ["docker", "exec", "inspatio-world", "bash", "-lc", dit_cmd],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
     )
 
     status("\u2705 Scene loaded! Model warming up (~1-2 min)...")
@@ -177,7 +283,10 @@ def _do_restart_dit(video_file, video_name, status, progress_queue):
 def process_scene_background(video_file, progress_queue):
     """Run preprocessing pipeline for a new video."""
     SCRIPT_DIR = "/workspace/inspatio-world"
-    GEN_H, GEN_W = 240, 416
+    # Use current quality setting for resolution
+    quality = session_state.get("quality", "scout")
+    res_map = {"scout": (240, 416), "draft": (360, 624), "full": (480, 832)}
+    GEN_H, GEN_W = res_map.get(quality, (240, 416))
     video_name = video_file.rsplit('.', 1)[0]
     traj = "x_y_circle_cycle.txt"
 
@@ -187,20 +296,8 @@ def process_scene_background(video_file, progress_queue):
 
     try:
         status(f"Processing {video_name}...")
-        write_pose(stop=True)
-        time.sleep(2)
-        # Kill ALL dit_stream processes inside container
-        try:
-            subprocess.run(["docker", "exec", "inspatio-world", "bash", "-c", "pkill -9 -f dit_stream"],
-                           timeout=10, capture_output=True)
-        except Exception:
-            pass
-        # Also kill from host side
-        try:
-            subprocess.run(["pkill", "-f", "dit_stream.py"], timeout=5, capture_output=True)
-        except Exception:
-            pass
-        time.sleep(3)
+        stop_dit_stream()
+        time.sleep(1)
 
         subprocess.run(["docker", "start", "inspatio-world"], timeout=10, capture_output=True)
         time.sleep(1)
@@ -209,16 +306,8 @@ def process_scene_background(video_file, progress_queue):
         render_dir = os.path.join(USER_INPUT, "new_vggt", video_name, "render")
         if os.path.exists(render_dir) and len(os.listdir(render_dir)) > 0:
             status("Scene already preprocessed — skipping pipeline")
-            # Just update new.json to point at this scene
-            scene_json = json.dumps([{
-                "video_path": f"./user_input/{video_file}",
-                "vggt_depth_path": f"./user_input/new_vggt/{video_name}",
-                "vggt_extrinsics_path": f"./user_input/new_vggt/{video_name}/extrinsics.txt",
-                "radius_ratio": 1,
-                "text": "A video scene."
-            }], indent=2)
-            with open(os.path.join(USER_INPUT, "new.json"), 'w') as f:
-                f.write(scene_json)
+            # Point the runtime at this exact scene, preserving known caption text when possible
+            update_active_scene_json(video_file)
             # Skip straight to DiT restart (below the pipeline steps)
             # Jump to restart section
             _do_restart_dit(video_file, video_name, status, progress_queue)
@@ -238,26 +327,19 @@ def process_scene_background(video_file, progress_queue):
         )
         if result.returncode != 0:
             status("Caption step had issues, using fallback...")
-            fallback = json.dumps([{
-                "video_path": f"./user_input/{video_file}",
-                "vggt_depth_path": f"./user_input/new_vggt/{video_name}",
-                "vggt_extrinsics_path": f"./user_input/new_vggt/{video_name}/extrinsics.txt",
-                "radius_ratio": 1,
-                "text": "A video scene with various objects and elements."
-            }], indent=2)
-            with open(os.path.join(USER_INPUT, "new.json"), 'w') as f:
-                f.write(fallback)
+            update_active_scene_json(video_file, text="A video scene with various objects and elements.")
         else:
             # Filter JSON to just our video
             json_path = os.path.join(USER_INPUT, "new.json")
             try:
                 with open(json_path, 'r') as f:
                     entries = json.load(f)
-                target = [e for e in entries if video_file in e.get("video_path", "")]
-                if not target:
-                    target = entries[-1:]
-                with open(json_path, 'w') as f:
-                    json.dump(target, f, indent=2)
+                target = [e for e in entries if os.path.basename(e.get("video_path", "")) == video_file]
+                if target:
+                    with open(json_path, 'w') as f:
+                        json.dump(target[:1], f, indent=2)
+                else:
+                    update_active_scene_json(video_file)
             except Exception:
                 pass
 
@@ -336,6 +418,9 @@ if not session_state["active_scene"]:
     session_state["active_scene"] = "IMG_7643.mp4"
 
 threading.Thread(target=generate_thumbnails, daemon=True).start()
+
+# Start server-side timer (default 60 min)
+start_server_timer(60)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -616,19 +701,30 @@ html,body{
 .scene-strip::-webkit-scrollbar{display:none}
 .scene-card{
   width:72px;flex-shrink:0;cursor:pointer;
+  position:relative;
 }
 .scene-card .thumb{
   width:72px;height:48px;border-radius:8px;
   overflow:hidden;border:2px solid transparent;
   background:#1a1a1a;
+  position:relative;
 }
 .scene-card .thumb.active{border-color:#51cf66}
+.scene-card .thumb.processing{border-color:#fcc419;animation:pulse 1s infinite}
 .scene-card .thumb img{width:100%;height:100%;object-fit:cover}
 .scene-card .sname{
   font-size:8px;color:rgba(255,255,255,0.35);
   text-align:center;margin-top:3px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
+.scene-card .status-badge{
+  position:absolute;top:2px;right:2px;
+  font-size:8px;padding:1px 4px;border-radius:4px;
+  background:rgba(0,0,0,0.7);backdrop-filter:blur(4px);
+}
+.scene-card .status-badge.ready{color:#51cf66}
+.scene-card .status-badge.pending{color:#fcc419}
+.scene-card .status-badge.working{color:#74c0fc;animation:pulse 1s infinite}
 .scene-add{
   width:72px;height:48px;border-radius:8px;
   border:1px dashed rgba(255,255,255,0.15);
@@ -637,6 +733,55 @@ html,body{
   cursor:pointer;flex-shrink:0;
 }
 .scene-add:active{background:rgba(255,255,255,0.05)}
+
+/* Library section */
+.lib-item{
+  display:flex;align-items:center;gap:10px;
+  padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05);
+}
+.lib-item:last-child{border-bottom:none}
+.lib-thumb{
+  width:56px;height:38px;border-radius:6px;overflow:hidden;
+  background:#1a1a1a;flex-shrink:0;
+}
+.lib-thumb img{width:100%;height:100%;object-fit:cover}
+.lib-info{flex:1;min-width:0}
+.lib-name{font-size:12px;font-weight:600;color:rgba(255,255,255,0.8);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lib-meta{font-size:10px;color:rgba(255,255,255,0.35);margin-top:1px}
+.lib-status{
+  font-size:9px;font-weight:600;padding:2px 6px;border-radius:4px;
+  white-space:nowrap;
+}
+.lib-status.ready{background:rgba(81,207,102,0.15);color:#51cf66}
+.lib-status.pending{background:rgba(252,196,25,0.15);color:#fcc419}
+.lib-status.working{background:rgba(116,192,252,0.15);color:#74c0fc;animation:pulse 1s infinite}
+.lib-delete{
+  width:28px;height:28px;border-radius:6px;
+  border:1px solid rgba(255,80,80,0.2);background:transparent;
+  color:rgba(255,80,80,0.5);font-size:12px;
+  cursor:pointer;display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;
+}
+.lib-delete:active{background:rgba(255,80,80,0.15)}
+.lib-delete.disabled{opacity:0.3;pointer-events:none}
+
+/* Scene loading overlay */
+.scene-overlay{
+  position:fixed;inset:0;z-index:35;
+  background:rgba(0,0,0,0.7);backdrop-filter:blur(8px);
+  display:none;flex-direction:column;align-items:center;justify-content:center;gap:16px;
+}
+.scene-overlay.visible{display:flex}
+.scene-overlay .so-spinner{width:40px;height:40px;border:3px solid rgba(255,255,255,0.1);border-top-color:#51cf66;border-radius:50%;animation:spin 0.8s linear infinite}
+.scene-overlay .so-title{font-size:16px;font-weight:700;color:#fff}
+.scene-overlay .so-detail{font-size:12px;color:rgba(255,255,255,0.5);text-align:center;max-width:250px}
+.scene-overlay .so-steps{display:flex;gap:6px;margin-top:4px}
+.scene-overlay .so-step{
+  font-size:10px;padding:3px 8px;border-radius:6px;
+  background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.3);
+}
+.scene-overlay .so-step.active{background:rgba(81,207,102,0.15);color:#51cf66}
+.scene-overlay .so-step.done{color:rgba(81,207,102,0.5)}
 
 /* GPU row */
 .gpu-row{
@@ -815,11 +960,27 @@ html,body{
   </div>
 
   <div class="drawer-section">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <div class="drawer-label" style="margin-bottom:0">Library</div>
+      <div style="font-size:10px;color:rgba(255,255,255,0.25);cursor:pointer" onclick="refreshLibrary()">↻ Refresh</div>
+    </div>
+    <div id="libraryList" style="margin-top:8px"></div>
+  </div>
+
+  <div class="drawer-section">
     <div class="gpu-row">
       <div class="gi" id="gpuLabel">GPU: InSpatio active</div>
       <button class="gpu-btn" id="gpuBtn" onclick="toggleGPU()">Free GPU</button>
     </div>
   </div>
+</div>
+
+<!-- Scene loading overlay -->
+<div class="scene-overlay" id="sceneOverlay">
+  <div class="so-spinner"></div>
+  <div class="so-title" id="soTitle">Loading scene...</div>
+  <div class="so-detail" id="soDetail">Preparing 3D data</div>
+  <div class="so-steps" id="soSteps"></div>
 </div>
 
 <!-- Drawer backdrop -->
@@ -844,7 +1005,7 @@ html,body{
 // ═══ State ═══
 const S={ws:null,paused:false,stopped:false,rec:false,recStart:0,recTimer:null,
   timerMin:60,timerEnd:null,timerInt:null,frames:0,lastFT:Date.now(),fpsSm:0,
-  quality:'scout',steps:2,sens:1.0,gotFirstFrame:false,activeScene:'IMG_7643.mp4'};
+  quality:'scout',steps:2,sens:1.0,gotFirstFrame:false,activeScene:'IMG_7643.mp4',resetToken:0};
 
 // ═══ Elements ═══
 const $=id=>document.getElementById(id);
@@ -858,6 +1019,8 @@ const el={
   drawer:$('drawer'),backdrop:$('backdrop'),sceneStrip:$('sceneStrip'),
   toast:$('toast'),gpuLabel:$('gpuLabel'),gpuBtn:$('gpuBtn'),
   uploadModal:$('uploadModal'),upProg:$('upProg'),upText:$('upText'),upBar:$('upBar'),
+  sceneOverlay:$('sceneOverlay'),soTitle:$('soTitle'),soDetail:$('soDetail'),soSteps:$('soSteps'),
+  libraryList:$('libraryList'),
 };
 
 // ═══ WebSocket ═══
@@ -870,14 +1033,12 @@ function connect(){
     S.stopped=false;
     // On reconnect after tab suspend, reset frame tracking so glob fallback finds current frames
     if(S.gotFirstFrame){
-      // We had frames before — this is a reconnect. Show brief "Resuming..." then frames will flow
       el.loading.classList.add('visible');el.loadingText.textContent='Resuming...';
-      // Force server to rescan frames by sending a ping
       setTimeout(()=>send({action:'resync'}),200);
     } else {
       el.loading.classList.add('visible');el.loadingText.textContent='Connecting to stream...';
     }
-    startTimer();
+    // Timer will sync from server via timer_sync message
   };
 
   S.ws.onmessage=ev=>{
@@ -909,12 +1070,48 @@ function connect(){
       document.body.appendChild(a);a.click();document.body.removeChild(a);
     }
 
-    if(d.type==='scenes')renderScenes(d.scenes);
+    if(d.type==='scenes'){renderScenes(d.scenes);renderLibrary(d.scenes);}
     if(d.type==='toast')showToast(d.message,d.done,d.error);
     if(d.type==='active_scene'){
       S.activeScene=d.scene;
       const name=d.scene.replace(/\.[^.]+$/,'');
       el.sceneInfo.textContent=name;
+      // Hide scene overlay if showing
+      el.sceneOverlay.classList.remove('visible');
+      S.gotFirstFrame=false; // expect new frames from new scene
+      el.loading.classList.add('visible');el.loadingText.textContent='Loading new scene...';
+    }
+    if(d.type==='scene_loading'){
+      // Show scene loading overlay
+      el.sceneOverlay.classList.add('visible');
+      el.soTitle.textContent=d.message||'Loading scene...';
+      el.soDetail.textContent=d.estimated?'Estimated: '+d.estimated:'Please wait...';
+      closeDrawer();
+    }
+    if(d.type==='scene_ready'){
+      // Scene finished loading
+      el.sceneOverlay.classList.remove('visible');
+      S.activeScene=d.scene;
+      S.gotFirstFrame=false;
+      el.loading.classList.add('visible');el.loadingText.textContent='Model warming up...';
+      const name=(d.scene||'').replace(/\.[^.]+$/,'');
+      el.sceneInfo.textContent=name;
+    }
+    if(d.type==='confirm_reload'){
+      // Scene already playing - ask to restart
+      S._pendingReload=d.scene;
+      showToast('Tap scene again to restart it',true,false);
+    }
+    if(d.type==='timer_sync'){
+      syncTimer(d.remaining_seconds, d.minutes_setting);
+    }
+    if(d.type==='timer_expired'){
+      S.stopped=true;S.paused=false;
+      el.playBtn.textContent='■';el.playBtn.classList.add('stopped');
+      el.canvas.classList.add('dimmed');
+      el.loading.classList.add('visible');el.loadingText.textContent='Session ended — GPU freed';
+      setStatus('off','ended');
+      el.timerChip.textContent='0:00';el.timerChip.style.color='#e03131';
     }
     if(d.type==='gpu_status'){
       el.gpuLabel.textContent=d.stopped?'GPU: Free':'GPU: InSpatio';
@@ -976,25 +1173,35 @@ function toggleRecord(){
   }else{clearInterval(S.recTimer);}
 }
 
-function resetView(){send({action:'reset'});}
+function resetView(){
+  S.resetToken=Date.now();
+  vpX=0;vpY=0;vpZoom=1.0;
+  applyViewport();
+  send({action:'reset',resetToken:S.resetToken});
+}
 
-// ═══ Timer ═══
+// ═══ Timer (server-synced) ═══
 function setTimer(m){
   S.timerMin=m;
   document.querySelectorAll('#timerPills .pill').forEach(p=>p.classList.toggle('active',parseInt(p.dataset.t)===m));
   send({action:'set_timer',minutes:m});
-  startTimer();
+  if(!m){el.timerChip.textContent='∞';S.timerRemaining=-1;}
 }
-function startTimer(){
-  clearInterval(S.timerInt);
-  if(!S.timerMin){el.timerChip.textContent='∞';return;}
-  S.timerEnd=Date.now()+S.timerMin*60000;
-  S.timerInt=setInterval(()=>{
-    const left=Math.max(0,S.timerEnd-Date.now());
-    if(left<=0){clearInterval(S.timerInt);el.timerChip.textContent='0:00';stopSession();return;}
-    const m=Math.floor(left/60000),s=Math.floor((left%60000)/1000);
-    el.timerChip.textContent=m+':'+String(s).padStart(2,'0');
-  },1000);
+function syncTimer(remainingSec, minutesSetting){
+  // Server sends remaining seconds — just display it
+  S.timerMin=minutesSetting;
+  S.timerRemaining=remainingSec;
+  document.querySelectorAll('#timerPills .pill').forEach(p=>p.classList.toggle('active',parseInt(p.dataset.t)===minutesSetting));
+  if(remainingSec<0){el.timerChip.textContent='∞';return;}
+  updateTimerDisplay(remainingSec);
+}
+function updateTimerDisplay(sec){
+  if(sec<0){el.timerChip.textContent='∞';return;}
+  const m=Math.floor(sec/60),s=Math.floor(sec%60);
+  el.timerChip.textContent=m+':'+String(s).padStart(2,'0');
+  if(sec<60)el.timerChip.style.color='#e03131';
+  else if(sec<300)el.timerChip.style.color='#fcc419';
+  else el.timerChip.style.color='';
 }
 
 // ═══ Quality ═══
@@ -1042,16 +1249,79 @@ function renderScenes(scenes){
   el.sceneStrip.innerHTML='';
   scenes.forEach(sc=>{
     const d=document.createElement('div');d.className='scene-card';
-    d.onclick=()=>send({action:'load_scene',scene:sc.file});
-    const cls=sc.active?'thumb active':'thumb';
-    if(sc.has_thumb)d.innerHTML=`<div class="${cls}"><img src="/thumb/${sc.name}.jpg"></div><div class="sname">${sc.name}</div>`;
-    else d.innerHTML=`<div class="${cls}" style="display:flex;align-items:center;justify-content:center;color:#444">🎬</div><div class="sname">${sc.name}</div>`;
+    d.onclick=()=>{
+      // If pending reload for same scene, force it
+      if(S._pendingReload===sc.file){
+        S._pendingReload=null;
+        send({action:'load_scene',scene:sc.file,force:true});
+      } else {
+        S._pendingReload=null;
+        send({action:'load_scene',scene:sc.file});
+      }
+    };
+    let cls='thumb';
+    if(sc.active)cls+=' active';
+    if(sc.is_processing)cls+=' processing';
+    // Status badge
+    let badge='';
+    if(sc.is_processing)badge='<div class="status-badge working">↻</div>';
+    else if(sc.processed)badge='<div class="status-badge ready">✓</div>';
+    else badge='<div class="status-badge pending">○</div>';
+    if(sc.has_thumb)d.innerHTML=`<div class="${cls}"><img src="/thumb/${sc.name}.jpg">${badge}</div><div class="sname">${sc.name}</div>`;
+    else d.innerHTML=`<div class="${cls}" style="display:flex;align-items:center;justify-content:center;color:#444">🎬${badge}</div><div class="sname">${sc.name}</div>`;
     el.sceneStrip.appendChild(d);
   });
   const add=document.createElement('div');add.className='scene-add';add.textContent='+';
   add.onclick=()=>{el.uploadModal.classList.add('visible');};
   el.sceneStrip.appendChild(add);
 }
+
+// ═══ Library ═══
+function renderLibrary(scenes){
+  if(!scenes)return;
+  el.libraryList.innerHTML='';
+  if(scenes.length===0){el.libraryList.innerHTML='<div style="font-size:11px;color:rgba(255,255,255,0.3);padding:8px 0">No videos yet. Tap + to add one.</div>';return;}
+  scenes.forEach(sc=>{
+    const item=document.createElement('div');item.className='lib-item';
+    // Status label
+    let statusCls='pending',statusTxt='Not processed';
+    if(sc.is_processing){statusCls='working';statusTxt='Processing...';}
+    else if(sc.processed){statusCls='ready';statusTxt='Ready';}
+    else if(sc.partially_processed){statusCls='pending';statusTxt='Partial';}
+    // Can delete?
+    const canDelete=!sc.active&&!sc.is_processing;
+    const thumbHtml=sc.has_thumb?`<img src="/thumb/${sc.name}.jpg">`:'<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:#444;font-size:14px">🎬</div>';
+    item.innerHTML=`
+      <div class="lib-thumb">${thumbHtml}</div>
+      <div class="lib-info">
+        <div class="lib-name">${sc.name}${sc.active?' ▶':''}</div>
+        <div class="lib-meta">${sc.size_mb} MB · ${sc.file.split('.').pop().toUpperCase()}</div>
+      </div>
+      <div class="lib-status ${statusCls}">${statusTxt}</div>
+      <button class="lib-delete ${canDelete?'':'disabled'}" onclick="deleteVideo('${sc.name}')">🗑</button>
+    `;
+    // Tap library item to load scene
+    item.querySelector('.lib-info').style.cursor='pointer';
+    item.querySelector('.lib-info').onclick=()=>send({action:'load_scene',scene:sc.file});
+    el.libraryList.appendChild(item);
+  });
+}
+
+async function deleteVideo(name){
+  if(!confirm('Delete "'+name+'" and all its processed data?'))return;
+  try{
+    const r=await fetch('/api/video/'+encodeURIComponent(name),{method:'DELETE'});
+    const data=await r.json();
+    if(r.ok){
+      showToast('✅ '+data.message,true,false);
+      send({action:'get_scenes'}); // refresh
+    }else{
+      showToast('❌ '+(data.detail||'Failed'),true,true);
+    }
+  }catch(e){showToast('❌ Network error',true,true);}
+}
+
+function refreshLibrary(){send({action:'get_scenes'});}
 
 // ═══ Upload ═══
 function pickFile(mode){
@@ -1128,7 +1398,19 @@ class Joystick{
 }
 
 let _mx=0,_my=0,_lx=0,_ly=0,_pd=false;
-setInterval(()=>{if(!_pd)return;_pd=false;send({action:'pose',moveX:Math.round(_mx*100)/100,moveY:Math.round(_my*100)/100,lookX:Math.round(_lx*100)/100,lookY:Math.round(_ly*100)/100});},50);
+setInterval(()=>{
+  if(!_pd)return;
+  _pd=false;
+  send({
+    action:'pose',
+    moveX:Math.round(_mx*100)/100,
+    moveY:Math.round(_my*100)/100,
+    lookX:Math.round(_lx*100)/100,
+    lookY:Math.round(_ly*100)/100,
+    zoom:Math.round(vpZoom*100)/100,
+    resetToken:S.resetToken,
+  });
+},50);
 
 // Viewport state for right joystick
 let vpX=0,vpY=0,vpZoom=1.0;
@@ -1142,20 +1424,14 @@ function applyViewport(){
   el.vid.style.transformOrigin='center center';
 }
 
-let _speedThrottle=null;
 const jL=new Joystick('joyL','knobL',(x,y)=>{
   _mx=x;_my=y;_pd=true;
-  // Throttle speed updates to every 100ms
-  if(!_speedThrottle){
-    _speedThrottle=setTimeout(()=>{_speedThrottle=null;},100);
-    send({action:'speed',speedY:-y,speedX:x});
-  }
 });
 const jR=new Joystick('joyR','knobR',(x,y)=>{
   _lx=x;_ly=y;_pd=true;
-  // Right joystick: X=pan left/right, Y=zoom in/out
+  // Right joystick also drives a local viewport preview so control feel is immediate
   vpX=x;
-  vpZoom=1.0+(-y*0.5); // push up = zoom in (1.5x), pull down = zoom out (0.5x)
+  vpZoom=1.0+(-y*0.5);
   vpZoom=Math.max(0.5,Math.min(2.0,vpZoom));
   applyViewport();
 });
@@ -1231,6 +1507,46 @@ async def upload_video(file: UploadFile = File(...)):
         return JSONResponse({"detail": str(e)[:100]}, status_code=500)
 
 
+@app.get("/api/library")
+async def get_library():
+    """Full library with processing status and sizes."""
+    scenes = get_available_scenes()
+    for sc in scenes:
+        sc["active"] = sc["file"] == session_state.get("active_scene")
+    return {"scenes": scenes, "active_scene": session_state.get("active_scene")}
+
+
+@app.delete("/api/video/{name}")
+async def delete_video(name: str):
+    """Delete a video and its preprocessed data."""
+    if session_state.get("active_scene", "").startswith(name):
+        return JSONResponse({"detail": "Cannot delete the active scene. Switch to another first."}, status_code=400)
+    if session_state.get("processing_scene", "") and name in session_state["processing_scene"]:
+        return JSONResponse({"detail": "Cannot delete while processing."}, status_code=400)
+    
+    deleted = []
+    # Delete video files
+    for ext in ('.mp4', '.mov', '.avi', '.MOV'):
+        path = os.path.join(USER_INPUT, name + ext)
+        if os.path.exists(path):
+            os.remove(path)
+            deleted.append(name + ext)
+    # Delete preprocessed data
+    vggt_dir = os.path.join(USER_INPUT, "new_vggt", name)
+    if os.path.exists(vggt_dir):
+        shutil.rmtree(vggt_dir, ignore_errors=True)
+        deleted.append(f"new_vggt/{name}/")
+    # Delete thumbnail
+    thumb = os.path.join(THUMBS_DIR, name + '.jpg')
+    if os.path.exists(thumb):
+        os.remove(thumb)
+        deleted.append("thumbnail")
+    
+    if deleted:
+        return {"message": f"Deleted {name}", "deleted": deleted}
+    return JSONResponse({"detail": f"Video '{name}' not found"}, status_code=404)
+
+
 @app.get("/download_recording")
 async def download_recording():
     path = os.path.join(IO_DIR, "recording.mp4")
@@ -1269,9 +1585,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     session_state["paused"] = False
 
                 elif action == "stop":
-                    stop_dit_stream()
-                    restore_llama_servers()
+                    end_session_cleanup()
                     await websocket.send_json({"type": "status", "status": "stopped"})
+                    await websocket.send_json({"type": "toast", "message": "✅ Session ended. GPU freed, llama servers restored.", "done": True})
 
                 elif action == "start_record":
                     recording = True
@@ -1282,36 +1598,66 @@ async def websocket_endpoint(websocket: WebSocket):
                     await stitch_and_send(websocket)
 
                 elif action == "reset":
-                    write_pose(yaw=0, pitch=0, zoom=1.0, moveX=0, moveY=0)
+                    write_pose(yaw=0, pitch=0, zoom=1.0, moveX=0, moveY=0, lookX=0, lookY=0, paused=False, stop=False, resetToken=msg.get("resetToken", time.time()))
 
                 elif action == "set_timer":
                     minutes = msg.get("minutes", 60)
-                    session_state["timer_minutes"] = minutes
-                    session_state["timer_end"] = time.time() + minutes * 60 if minutes else None
+                    start_server_timer(minutes)
 
                 elif action == "set_quality":
-                    cfg = {"quality": msg.get("quality", "scout"), "steps": msg.get("steps", 2)}
+                    new_quality = msg.get("quality", session_state["quality"])
+                    new_steps = msg.get("steps", session_state["steps"])
+                    resolution_changed = new_quality != session_state["quality"]
+                    cfg = {"quality": new_quality, "steps": new_steps}
                     with open(os.path.join(IO_DIR, "quality.json"), 'w') as f:
                         json.dump(cfg, f)
+                    session_state["quality"] = new_quality
+                    session_state["steps"] = new_steps
+                    if resolution_changed and session_state["active_scene"] and not session_state["processing_scene"]:
+                        # Resolution change requires DiT restart
+                        await websocket.send_json({"type": "toast", "message": f"Switching to {new_quality}... restarting stream", "done": False})
+                        scene_file = session_state["active_scene"]
+                        session_state["processing_scene"] = scene_file
+                        pq = queue_mod.Queue()
+                        threading.Thread(target=process_scene_background, args=(scene_file, pq), daemon=True).start()
+                        async def poll_qual():
+                            while True:
+                                await asyncio.sleep(1)
+                                try:
+                                    while not pq.empty():
+                                        u = pq.get_nowait()
+                                        await websocket.send_json(u)
+                                        if u.get("done"):
+                                            await websocket.send_json({"type": "scene_ready", "scene": session_state["active_scene"]})
+                                            return
+                                except Exception:
+                                    return
+                        asyncio.create_task(poll_qual())
+                    else:
+                        # Steps change only — dit_stream.py reads quality.json every block
+                        step_labels = {2: "fast", 3: "balanced", 4: "best"}
+                        await websocket.send_json({"type": "toast", "message": f"Steps → {new_steps} ({step_labels.get(new_steps, '')})", "done": True})
 
                 elif action == "load_scene":
                     scene_file = msg.get("scene", "")
-                    if scene_file == session_state["active_scene"]:
-                        await websocket.send_json({"type": "toast", "message": "Already playing this scene", "done": True})
-                    elif session_state["processing_scene"]:
-                        await websocket.send_json({"type": "toast", "message": "Already processing, please wait..."})
+                    force = msg.get("force", False)
+                    if session_state["processing_scene"]:
+                        await websocket.send_json({"type": "toast", "message": "Already processing a scene, please wait...", "done": True})
+                    elif scene_file == session_state["active_scene"] and not force:
+                        # Same scene — offer to restart it
+                        await websocket.send_json({"type": "confirm_reload", "scene": scene_file, "message": "This scene is already playing. Tap again to restart it."})
                     else:
                         session_state["processing_scene"] = scene_file
                         scene_name = scene_file.rsplit('.', 1)[0]
-                        # Check if already preprocessed
                         render_dir = os.path.join(USER_INPUT, "new_vggt", scene_name, "render")
                         already_done = os.path.exists(render_dir) and len(os.listdir(render_dir)) > 0
                         pq = queue_mod.Queue()
                         threading.Thread(target=process_scene_background, args=(scene_file, pq), daemon=True).start()
+                        # Notify frontend to show loading overlay
                         if already_done:
-                            await websocket.send_json({"type": "toast", "message": f"Loading {scene_name}... (already processed, ~1-2 min)"})
+                            await websocket.send_json({"type": "scene_loading", "scene": scene_name, "message": f"Loading {scene_name}...", "estimated": "~1-2 min"})
                         else:
-                            await websocket.send_json({"type": "toast", "message": f"Processing {scene_name}... (~3-5 min)"})
+                            await websocket.send_json({"type": "scene_loading", "scene": scene_name, "message": f"Processing {scene_name}...", "estimated": "~3-5 min"})
 
                         async def poll():
                             while True:
@@ -1321,6 +1667,8 @@ async def websocket_endpoint(websocket: WebSocket):
                                         u = pq.get_nowait()
                                         await websocket.send_json(u)
                                         if u.get("done"):
+                                            # Signal scene change complete
+                                            await websocket.send_json({"type": "scene_ready", "scene": session_state["active_scene"]})
                                             return
                                 except Exception:
                                     return
@@ -1336,6 +1684,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     write_pose(
                         moveX=msg.get("moveX", 0), moveY=msg.get("moveY", 0),
                         lookX=msg.get("lookX", 0), lookY=msg.get("lookY", 0),
+                        zoom=msg.get("zoom", 1.0),
+                        resetToken=msg.get("resetToken"),
                     )
 
                 elif action == "speed":
@@ -1371,23 +1721,61 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception:
                 break
 
-    # Send initial active scene info
+    # Send initial state (scene + timer sync)
     try:
         await websocket.send_json({"type": "active_scene", "scene": session_state.get("active_scene", "IMG_7643.mp4")})
+        # Sync server timer to client
+        remaining = get_timer_remaining()
+        await websocket.send_json({
+            "type": "timer_sync",
+            "remaining_seconds": remaining,
+            "minutes_setting": session_state["timer_minutes"],
+        })
     except Exception:
         pass
 
     asyncio.create_task(receive_commands())
 
-    # Instead of globbing 1000s of files every tick, probe sequentially
-    # Frame delivery loop — simple and fast
+    # Track scene generation to detect switches
+    current_generation = session_state["scene_generation"]
+
+    # Frame delivery loop
     while True:
         await asyncio.sleep(0.05)
 
         if paused:
             continue
 
-        # On first connect or after resync, find the latest frame via status.json
+        # Server-side timer expiry check
+        remaining = get_timer_remaining()
+        if remaining == 0 and session_state["timer_end"] is not None:
+            try:
+                await websocket.send_json({"type": "timer_expired"})
+                await websocket.send_json({"type": "toast", "message": "⏰ Session timer expired. GPU freed, llama servers restored.", "done": True})
+            except Exception:
+                pass
+            end_session_cleanup()
+            break
+
+        # Send timer sync every ~5 seconds (every 100 frames at 50ms interval)
+        if remaining > 0 and int(time.time()) % 5 == 0:
+            try:
+                await websocket.send_json({"type": "timer_sync", "remaining_seconds": remaining, "minutes_setting": session_state["timer_minutes"]})
+            except Exception:
+                pass
+
+        # Check if scene changed (another scene loaded)
+        if session_state["scene_generation"] != current_generation:
+            current_generation = session_state["scene_generation"]
+            last_frame_idx = -1
+            frame_speed = 1
+            frame_jump = 0
+            try:
+                await websocket.send_json({"type": "active_scene", "scene": session_state["active_scene"]})
+            except Exception:
+                pass
+
+        # On first connect or after resync/scene-switch, find the latest frame via status.json
         if last_frame_idx == -1:
             try:
                 with open(STATUS_FILE, 'r') as f:

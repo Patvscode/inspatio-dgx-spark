@@ -35,10 +35,19 @@ from pipeline.causal_inference import denoise_block
 from utils.misc import set_seed
 from utils.render_warper import convert_mask_video
 
+# Live camera control
+try:
+    from live_camera import LiveCamera
+    LIVE_CAMERA_AVAILABLE = True
+except ImportError:
+    LIVE_CAMERA_AVAILABLE = False
+    print("[WARN] live_camera module not found, using pre-baked trajectory only", flush=True)
+
 IO_DIR = "/workspace/inspatio-world/interactive_io"
 POSE_FILE = os.path.join(IO_DIR, "pose.json")
 FRAMES_DIR = os.path.join(IO_DIR, "frames")
 STATUS_FILE = os.path.join(IO_DIR, "status.json")
+QUALITY_FILE = os.path.join(IO_DIR, "quality.json")
 
 # Initialize for single-GPU (no distributed)
 os.environ["MASTER_ADDR"] = "127.0.0.1"
@@ -87,9 +96,22 @@ def main():
     default_config = OmegaConf.load("configs/default_config.yaml")
     config = OmegaConf.merge(default_config, config)
     
-    # Force scout resolution for speed
-    config.dataset.video_size = [240, 416]
-    config.denoising_step_list = [1000, 250]  # 2 steps for speed
+    # Read quality settings from quality.json
+    init_h, init_w = 240, 416
+    init_steps = [1000, 250]
+    try:
+        with open(QUALITY_FILE, 'r') as f:
+            qcfg = json.load(f)
+        res_map = {"scout": (240, 416), "draft": (360, 624), "full": (480, 832)}
+        init_h, init_w = res_map.get(qcfg.get("quality", "scout"), (240, 416))
+        step_map = {2: [1000, 250], 3: [1000, 500, 250], 4: [1000, 750, 500, 250]}
+        init_steps = step_map.get(qcfg.get("steps", 2), [1000, 250])
+        print(f"[QUALITY] Startup: {init_h}x{init_w}, steps={init_steps}", flush=True)
+    except Exception:
+        print("[QUALITY] No quality.json, using defaults (240x416, 2 steps)", flush=True)
+    
+    config.dataset.video_size = [init_h, init_w]
+    config.denoising_step_list = init_steps
     
     num_frame_per_block = getattr(config, "num_frame_per_block", 3)
     
@@ -162,8 +184,9 @@ def main():
     # ── DiT warmup ──
     write_status("warming_up")
     F_warmup = num_frame_per_block
-    # Latent dims for 240x416: h=30, w=52
-    lat_h, lat_w = 30, 52
+    # Latent dims: resolution / 8
+    lat_h, lat_w = init_h // 8, init_w // 8
+    print(f"Latent dims: {lat_h}x{lat_w} (from {init_h}x{init_w})", flush=True)
     
     dummy_noise = torch.randn(1, F_warmup, 16, lat_h, lat_w, device=device, dtype=torch.bfloat16)
     dummy_render = torch.randn(1, F_warmup, 20, lat_h, lat_w, device=device, dtype=torch.bfloat16)
@@ -207,7 +230,7 @@ def main():
         return
     
     dataset_config['json_path'] = json_path
-    dataset_config['video_size'] = [240, 416]
+    dataset_config['video_size'] = [init_h, init_w]
     dataset = VideoDataset(**dataset_config)
     
     if len(dataset) == 0:
@@ -227,6 +250,27 @@ def main():
     
     source_video = batch["source_video"].unsqueeze(0).to(device, dtype=torch.bfloat16)
     source_video = rearrange(source_video, 'b t c h w -> b c t h w')
+    
+    # ── Live Camera Setup ──
+    live_cam = None
+    if LIVE_CAMERA_AVAILABLE:
+        try:
+            with open(json_path, 'r') as f:
+                scene_data = json.load(f)
+            if scene_data:
+                da3_path = scene_data[0].get("vggt_depth_path", "")
+                if da3_path.startswith("./"):
+                    da3_path = os.path.join("/workspace/inspatio-world", da3_path[2:])
+                live_cam = LiveCamera(da3_path, device, init_w, init_h)
+                if live_cam.load():
+                    write_status("camera_ready", message="Live camera control active")
+                    print("[CAMERA] Live camera control ACTIVE", flush=True)
+                else:
+                    live_cam = None
+                    print("[CAMERA] Failed to load, using pre-baked trajectory", flush=True)
+        except Exception as e:
+            print(f"[CAMERA] Init error: {e}, using pre-baked trajectory", flush=True)
+            live_cam = None
     
     # TAE encode
     def tae_encode(video_bcthw):
@@ -268,6 +312,7 @@ def main():
     frame_counter = 0
     block_idx = 0
     last_pred = None
+    last_reset_token = None
     reset_kv_cache()
     
     noise = torch.randn(
@@ -292,9 +337,66 @@ def main():
         t_block_start = time.time()
         
         noisy_input = noise[:, start_index:start_index + num_frame_per_block]
-        render_block = render_latent[:, start_index:start_index + num_frame_per_block]
-        mask_block = mask_latent[:, start_index:start_index + num_frame_per_block]
         ref_block = ref_latent[:, start_index:start_index + num_frame_per_block]
+        
+        # ── Camera control: live render or pre-baked ──
+        pose = read_pose()
+        reset_token = pose.get("resetToken")
+        if live_cam is not None and reset_token != last_reset_token:
+            live_cam.reset()
+            last_reset_token = reset_token
+            print("[CAMERA] Reset live camera accumulators", flush=True)
+
+        # Left joystick: moveX/moveY (translation), Right joystick: lookX/lookY (rotation)
+        joystick_yaw = pose.get("lookX", pose.get("yaw", 0))    # right stick X = yaw
+        joystick_pitch = pose.get("lookY", pose.get("pitch", 0))  # right stick Y = pitch
+        joystick_zoom = pose.get("zoom", 1.0)
+        joystick_move_x = pose.get("moveX", 0)  # left stick = strafe
+        joystick_move_y = pose.get("moveY", 0)  # left stick = dolly
+        joystick_active = (abs(joystick_yaw) > 0.05 or abs(joystick_pitch) > 0.05 or
+                           abs(joystick_move_x) > 0.05 or abs(joystick_move_y) > 0.05 or
+                           abs(joystick_zoom - 1.0) > 0.03)
+        
+        if live_cam is not None and joystick_active:
+            # Live rendering from point cloud with joystick control
+            render_video_block, mask_video_block = live_cam.render_block(
+                start_index, num_frame_per_block,
+                joystick_yaw, joystick_pitch, joystick_zoom,
+                joystick_move_x, joystick_move_y,
+            )
+            if render_video_block is not None:
+                # TAE encode the live-rendered frames
+                with torch.no_grad():
+                    rv = render_video_block.permute(0, 2, 1, 3, 4)  # b c t h w -> b t c h w
+                    rv = ((rv * 0.5 + 0.5).clamp(0, 1)).to(torch.float16)
+                    render_block = tae_model.encode_video(rv, show_progress_bar=False).to(torch.bfloat16)
+                    
+                    # Mask: downsample to latent size
+                    mv = mask_video_block  # [1, 1, T, H, W]
+                    mv = rearrange(mv, 'b c t h w -> (b t) c h w')
+                    mv = torch.nn.functional.interpolate(mv, size=(lat_h, lat_w), mode='bilinear', align_corners=False)
+                    mv = rearrange(mv, '(b t) c h w -> b t c h w', b=1)
+                    # Pad: replicate first frame 4x, then concat rest (matching convert_mask_video)
+                    mv_padded = torch.cat([mv[:, 0:1].repeat(1, 4, 1, 1, 1), mv[:, 1:]], dim=1)
+                    # Trim to divisible by 4
+                    trim = mv_padded.shape[1] - mv_padded.shape[1] % 4
+                    mv_padded = mv_padded[:, :trim]
+                    mask_block = mv_padded.view(1, mv_padded.shape[1] // 4, 4, lat_h, lat_w)
+            else:
+                # Fallback to pre-baked
+                render_block = render_latent[:, start_index:start_index + num_frame_per_block]
+                mask_block = mask_latent[:, start_index:start_index + num_frame_per_block]
+        else:
+            # Pre-baked trajectory (no joystick input)
+            render_block = render_latent[:, start_index:start_index + num_frame_per_block]
+            mask_block = mask_latent[:, start_index:start_index + num_frame_per_block]
+            if live_cam is not None:
+                # Decay offsets back toward the base path when controls are idle
+                live_cam.yaw_accum *= 0.95
+                live_cam.pitch_accum *= 0.95
+                live_cam.strafe_accum *= 0.90
+                live_cam.forward_accum *= 0.90
+                live_cam.zoom_accum += (1.0 - live_cam.zoom_accum) * 0.15
         
         render_input = torch.cat([mask_block, render_block], dim=2)
         
@@ -352,8 +454,24 @@ def main():
         
         block_idx += 1
         
-        # Check for pause/stop
-        pose = read_pose()
+        # Hot-reload quality.json (denoising steps)
+        try:
+            with open(QUALITY_FILE, 'r') as f:
+                qcfg = json.load(f)
+            new_steps = qcfg.get("steps", 2)
+            step_map = {
+                2: [1000, 250],
+                3: [1000, 500, 250],
+                4: [1000, 750, 500, 250],
+            }
+            new_step_list = step_map.get(new_steps, [1000, 250])
+            if new_step_list != pipeline.denoising_step_list:
+                pipeline.denoising_step_list = new_step_list
+                print(f"[QUALITY] Denoising steps changed to {new_steps}: {new_step_list}", flush=True)
+        except Exception:
+            pass
+        
+        # Check for pause/stop (pose already read above for camera control)
         if pose.get("stop", False):
             write_status("stopped")
             print("Stop signal received. Exiting.", flush=True)

@@ -171,10 +171,11 @@ def run_dit_refinement(scene: SceneData, yaw, pitch, zoom, preset_name, gpu_mgr)
     yaw_clamped = np.clip(yaw, -60, 60)
 
     # Write 3-frame static trajectory (model needs at least 3 frames per block)
+    radius = np.clip(zoom, 0.6, 2.2)
     with open(traj_path, 'w') as f:
         angles_x = " ".join([f"{pitch_clamped:.1f}"] * 4)
         angles_y = " ".join([f"{yaw_clamped:.1f}"] * 4)
-        radii = " ".join(["1.0"] * 4)
+        radii = " ".join([f"{radius:.3f}"] * 4)
         f.write(f"{angles_x}\n{angles_y}\n{radii}\n")
 
     # Clean stale output — pipeline outputs to output/user_input/_interactive_pose/
