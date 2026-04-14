@@ -889,7 +889,7 @@ html,body{
     <button class="abtn abtn-play" id="playBtn" onclick="togglePause()">⏸</button>
     <button class="abtn abtn-sm" onclick="stopSession()">■</button>
     <div class="spacer"></div>
-    <button class="abtn abtn-sm" onclick="resetView()">↻</button>
+    <button class="abtn abtn-sm" id="resetBtn" title="Hold to reset">↻</button>
   </div>
 
   <!-- Joystick row -->
@@ -1006,7 +1006,8 @@ html,body{
 // ═══ State ═══
 const S={ws:null,paused:false,stopped:false,rec:false,recStart:0,recTimer:null,
   timerMin:60,timerEnd:null,timerInt:null,frames:0,lastFT:Date.now(),fpsSm:0,
-  quality:'scout',steps:2,sens:1.0,gotFirstFrame:false,activeScene:'IMG_7643.mp4',resetToken:0};
+  quality:'scout',steps:2,sens:1.0,gotFirstFrame:false,activeScene:'IMG_7643.mp4',resetToken:0,
+  resetHoldTimer:null,resetHoldArmed:false};
 
 // ═══ Elements ═══
 const $=id=>document.getElementById(id);
@@ -1178,6 +1179,28 @@ function resetView(){
   S.resetToken=Date.now();
   vpZoom=1.0;
   send({action:'reset',resetToken:S.resetToken});
+}
+
+function armResetHold(){
+  if(S.resetHoldTimer) clearTimeout(S.resetHoldTimer);
+  S.resetHoldArmed=true;
+  el.resetBtn.textContent='…';
+  S.resetHoldTimer=setTimeout(()=>{
+    S.resetHoldTimer=null;
+    if(!S.resetHoldArmed) return;
+    el.resetBtn.textContent='↻';
+    toast('View reset', true);
+    resetView();
+  }, 900);
+}
+
+function cancelResetHold(){
+  S.resetHoldArmed=false;
+  if(S.resetHoldTimer){
+    clearTimeout(S.resetHoldTimer);
+    S.resetHoldTimer=null;
+  }
+  if(el.resetBtn) el.resetBtn.textContent='↻';
 }
 
 // ═══ Timer (server-synced) ═══
@@ -1424,8 +1447,16 @@ const jR=new Joystick('joyR','knobR',(x,y)=>{
   vpZoom=Math.max(0.5,Math.min(2.0,vpZoom));
 });
 
+function bindResetButton(){
+  const b=el.resetBtn;
+  if(!b) return;
+  ['mousedown','touchstart','pointerdown'].forEach(ev=>b.addEventListener(ev, armResetHold, {passive:false}));
+  ['mouseup','mouseleave','touchend','touchcancel','pointerup','pointercancel'].forEach(ev=>b.addEventListener(ev, cancelResetHold, {passive:false}));
+}
+
 // ═══ Init ═══
 el.loading.classList.add('visible');
+bindResetButton();
 connect();
 </script>
 </body>
