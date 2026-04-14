@@ -31,3 +31,15 @@ output/
 checkpoints/
 __pycache__/
 *.pyc
+interactive_io/frames/
+interactive_io/recording/
+interactive_io/recording.mp4
+interactive_io/thumbnails/
+interactive_io/status.json
+interactive_io/pose.json
+interactive_io/quality.json
+user_input/*.mov
+user_input/new_vggt/
+__pycache__/
+*.pyc
+=*

@@ -64,9 +64,6 @@ FREEZE_FRAME=""
 USE_TAE=false
 TAE_CHECKPOINT_PATH="${SCRIPT_DIR}/checkpoints/taehv/taew2_1.pth"
 COMPILE_DIT=false
-GEN_WIDTH=832
-GEN_HEIGHT=480
-DENOISING_STEPS=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -162,18 +159,6 @@ while [[ $# -gt 0 ]]; do
         --compile_dit)
             COMPILE_DIT=true
             shift
-            ;;
-        --gen_width)
-            GEN_WIDTH="$2"
-            shift 2
-            ;;
-        --gen_height)
-            GEN_HEIGHT="$2"
-            shift 2
-            ;;
-        --denoising_steps)
-            DENOISING_STEPS="$2"
-            shift 2
             ;;
         *)
             echo "Unknown option: $1"
@@ -284,7 +269,7 @@ fi
 # Step 2: Generate depth with DA3 + convert + render point clouds
 ##############################################################################
 DA3_CLI="${SCRIPT_DIR}/depth/depth_predict_da3_cli.py"
-DA3_CONFIG="{\"model_path\":\"${DA3_MODEL_PATH}\",\"fix_resize\":true,\"fix_resize_height\":${GEN_HEIGHT},\"fix_resize_width\":${GEN_WIDTH},\"num_frames\":1000,\"save_point_cloud\":true}"
+DA3_CONFIG="{\"model_path\":\"${DA3_MODEL_PATH}\",\"fix_resize\":true,\"fix_resize_height\":480,\"fix_resize_width\":832,\"num_frames\":1000,\"save_point_cloud\":true}"
 CONVERT_SCRIPT="${SCRIPT_DIR}/scripts/convert_da3_to_pi3.py"
 RENDER_SCRIPT="${SCRIPT_DIR}/scripts/render_point_cloud.py"
 
@@ -327,7 +312,7 @@ python "$SCRIPT_DIR/scripts/run_render_parallel.py" \
     --gpu_list "$STEP2_GPUS" \
     --render_script "$RENDER_SCRIPT" \
     --traj_txt_path "$TRAJ_TXT_PATH" \
-    --width ${GEN_WIDTH} --height ${GEN_HEIGHT} \
+    --width 832 --height 480 \
     $([ "$RELATIVE_TO_SOURCE" = true ] && echo "--relative_to_source") \
     $([ "$ROTATION_ONLY" = true ] && echo "--rotation_only") \
     $([ "$FREEZE_REPEAT" -gt 0 ] 2>/dev/null && echo "--freeze_repeat $FREEZE_REPEAT") \
@@ -373,21 +358,6 @@ if [ "$SKIP_STEP3" = false ]; then
     sed -i "/^[[:space:]]*#/!s|rotation_only:.*|rotation_only: ${ROTATION_ONLY}|g" "$TMP_CONFIG"
     sed -i "/^[[:space:]]*#/!s|adaptive_frame:.*|adaptive_frame: ${ADAPTIVE_FRAME}|g" "$TMP_CONFIG"
     sed -i "/^[[:space:]]*#/!s|freeze_repeat:.*|freeze_repeat: ${FREEZE_REPEAT}|g" "$TMP_CONFIG"
-
-    # Override resolution and denoising steps
-    sed -i "s/^\(  \)\{0,1\}video_size:.*//" "$TMP_CONFIG"
-    echo "" >> "$TMP_CONFIG"
-    echo "  video_size:" >> "$TMP_CONFIG"
-    echo "  - ${GEN_HEIGHT}" >> "$TMP_CONFIG"
-    echo "  - ${GEN_WIDTH}" >> "$TMP_CONFIG"
-    if [ -n "$DENOISING_STEPS" ]; then
-        sed -i "/^denoising_step_list:/,/^[^ ]/{ /^denoising_step_list:/d; /^- /d; }" "$TMP_CONFIG"
-        echo "denoising_step_list:" >> "$TMP_CONFIG"
-        IFS="," read -ra STEPS <<< "$DENOISING_STEPS"
-        for s in "${STEPS[@]}"; do
-            echo "- ${s}" >> "$TMP_CONFIG"
-        done
-    fi
     if [ -n "$FREEZE_FRAME" ]; then
         sed -i "/^[[:space:]]*#/!s|freeze_frame:.*|freeze_frame: ${FREEZE_FRAME}|g" "$TMP_CONFIG"
     fi

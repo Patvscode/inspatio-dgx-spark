@@ -100,7 +100,6 @@ class SceneData:
         # Find point cloud
         ply_path = os.path.join(self.scene_dir, "point_cloud.ply")
         if not os.path.exists(ply_path):
-            # Search in subdirs
             plys = glob.glob(os.path.join(self.scene_dir, "**/point_cloud.ply"), recursive=True)
             if plys:
                 ply_path = plys[0]
@@ -112,28 +111,25 @@ class SceneData:
         self.points = np.stack([v['x'], v['y'], v['z']], axis=-1).astype(np.float32)
         self.colors = np.stack([v['red'], v['green'], v['blue']], axis=-1).astype(np.uint8)
 
-        # Find json_path (for DiT inference)
-        parent = os.path.dirname(os.path.dirname(ply_path))  # up from da3_tmp
-        jsons = glob.glob(os.path.join(parent, "*.json"))
-        if jsons:
-            self.json_path = jsons[0]
-
         print(f"Loaded {len(self.points)} points from {ply_path}")
         return self
 
 
 def find_latest_scene():
-    """Find the most recently processed scene."""
+    """Find the most recently processed scene. Returns (ply_dir, json_path) or (None, None)."""
     base = os.path.join(HOST_DIR, "user_input")
     if not os.path.isdir(base):
-        return None
+        return None, None
     # Look for da3_tmp dirs with point_cloud.ply
     plys = glob.glob(os.path.join(base, "**/*_da3_tmp/point_cloud.ply"), recursive=True)
     if not plys:
-        return None
-    # Return the directory of the most recent one
+        return None, None
     newest = max(plys, key=os.path.getmtime)
-    return os.path.dirname(newest)
+    ply_dir = os.path.dirname(newest)
+    # Find json — look in user_input/ for new.json
+    jsons = glob.glob(os.path.join(base, "*.json"))
+    json_path = jsons[0] if jsons else None
+    return ply_dir, json_path
 
 
 def pose_to_spherical(wxyz, position):
@@ -181,26 +177,20 @@ def run_dit_refinement(scene: SceneData, yaw, pitch, zoom, preset_name, gpu_mgr)
         radii = " ".join(["1.0"] * 4)
         f.write(f"{angles_x}\n{angles_y}\n{radii}\n")
 
-    # Clean stale output
+    # Clean stale output — pipeline outputs to output/user_input/_interactive_pose/
     traj_name = "_interactive_pose"
-    json_name = os.path.splitext(os.path.basename(scene.json_path))[0]
-    # The output goes to output/<input_dir_name>/<traj_name>/
-    input_dir_name = os.path.basename(os.path.dirname(scene.json_path))
-    output_dir = os.path.join(HOST_DIR, "output", input_dir_name, traj_name)
+    output_dir = os.path.join(HOST_DIR, "output", "user_input", traj_name)
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir)
 
-    # Get the input dir name for the pipeline
-    input_rel = os.path.relpath(os.path.dirname(scene.json_path), HOST_DIR)
-
-    # Build docker exec command
+    # The json references ./user_input/ paths, so input_dir is user_input
     cmd = (
         f"cd {CONTAINER_WORK} && "
         f"TORCH_CUDA_ARCH_LIST=12.1a "
         f"TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas "
         f"TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache "
         f"bash run_test_pipeline.sh "
-        f"--input_dir ./{input_rel} "
+        f"--input_dir ./user_input "
         f"--traj_txt_path ./traj/_interactive_pose.txt "
         f"--config_path {CONTAINER_CONFIG} "
         f"--master_port 29516 "
@@ -210,18 +200,29 @@ def run_dit_refinement(scene: SceneData, yaw, pitch, zoom, preset_name, gpu_mgr)
         f"--use_tae --compile_dit"
     )
 
+    print(f"[DiT] Running: gen_width={w} gen_height={h} steps={steps}")
+    print(f"[DiT] Output dir: {output_dir}")
+    
     gpu_mgr.stop()
     try:
         result = subprocess.run(
             ["docker", "exec", CONTAINER_NAME, "bash", "-c", cmd],
             capture_output=True, text=True, timeout=600)
     except Exception as e:
+        print(f"[DiT] Exception: {e}")
         gpu_mgr.restart()
         return None
 
     if result.returncode != 0:
+        stderr_tail = (result.stderr or "")[-500:]
+        stdout_tail = (result.stdout or "")[-500:]
+        print(f"[DiT] Failed (code {result.returncode})")
+        print(f"[DiT] stderr: {stderr_tail}")
+        print(f"[DiT] stdout: {stdout_tail}")
         gpu_mgr.restart()
         return None
+    
+    print(f"[DiT] Pipeline completed successfully")
 
     # Find output video
     pred_videos = sorted(glob.glob(os.path.join(output_dir, "**/*pred_video*.mp4"), recursive=True))
@@ -262,22 +263,38 @@ def main():
     gpu_mgr = GPUManager()
 
     # Find latest scene
-    scene_dir = find_latest_scene()
+    scene_dir, json_path = find_latest_scene()
     if scene_dir is None:
         print("No preprocessed scenes found. Run the Gradio app first to process a video.")
         print("Then restart this viewer.")
         return
 
     print(f"Loading scene from: {scene_dir}")
+    print(f"JSON path: {json_path}")
     scene = SceneData(scene_dir).load()
+    if json_path:
+        scene.json_path = json_path
 
     # Start Viser
     server = viser.ViserServer(port=PORT)
+    
+    # Theme: collapsible panel (starts hidden on mobile), dark mode
+    server.gui.configure_theme(
+        control_layout="collapsible",
+        control_width="small",
+        dark_mode=True,
+        show_logo=False,
+        show_share_button=False,
+        brand_color=(102, 126, 234),
+    )
+    server.gui.set_panel_label("Controls")
+    
     print(f"\n{'='*60}")
     print(f"  InSpatio-World Interactive Viewer")
     print(f"  Local:     http://localhost:{PORT}")
     print(f"  Tailscale: http://100.109.173.109:{PORT}")
     print(f"  Points:    {len(scene.points):,}")
+    print(f"  Controls:  Drag=orbit, Pinch/Scroll=zoom, 2-finger=pan")
     print(f"{'='*60}\n")
 
     # ── Scene ──
@@ -289,38 +306,30 @@ def main():
     )
 
     # ── GUI ──
-    # Title
-    server.gui.add_markdown("## InSpatio-World Explorer")
+    gui_status = server.gui.add_markdown("*🔭 Drag to orbit • Pinch to zoom • Pause to refine*")
 
-    # Quality preset
+    # Main controls
     preset_names = list(PRESETS.keys())
     gui_preset = server.gui.add_dropdown(
         "Quality", preset_names, initial_value=preset_names[0]
     )
-
-    # Auto-refine
-    gui_auto_refine = server.gui.add_checkbox("Auto-Refine", initial_value=True)
-    gui_refine_delay = server.gui.add_slider(
-        "Refine Delay (s)", min=0.5, max=5.0, step=0.5, initial_value=1.5
-    )
-
-    # Manual refine
     gui_refine_btn = server.gui.add_button("⚡ Refine Now")
 
-    # Point cloud appearance
-    gui_point_size = server.gui.add_slider(
-        "Point Size", min=0.005, max=0.05, step=0.005, initial_value=0.015
-    )
+    # Settings in folder
+    with server.gui.add_folder("Settings", expand_by_default=False):
+        gui_auto_refine = server.gui.add_checkbox("Auto-Refine", initial_value=True)
+        gui_refine_delay = server.gui.add_slider(
+            "Refine Delay (s)", min=0.5, max=5.0, step=0.5, initial_value=1.5
+        )
+        gui_point_size = server.gui.add_slider(
+            "Point Size", min=0.005, max=0.05, step=0.005, initial_value=0.015
+        )
+        gui_keep_gpu = server.gui.add_checkbox("Keep GPU (batch)", initial_value=False)
 
-    # Keep GPU toggle
-    gui_keep_gpu = server.gui.add_checkbox("Keep GPU (batch mode)", initial_value=False)
-
-    # Status
-    gui_status = server.gui.add_markdown("*Status: Ready — orbit to explore*")
-
-    # GPU controls
-    gui_free_gpu = server.gui.add_button("🔓 Free GPU")
-    gui_restore_gpu = server.gui.add_button("🔒 Restore Models")
+    # GPU controls in folder
+    with server.gui.add_folder("GPU", expand_by_default=False):
+        gui_free_gpu = server.gui.add_button("🔓 Free GPU")
+        gui_restore_gpu = server.gui.add_button("🔒 Restore Models")
 
     # ── Point size callback ──
     @gui_point_size.on_update
