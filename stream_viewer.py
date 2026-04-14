@@ -253,7 +253,7 @@ def _do_restart_dit(video_file, video_name, status, progress_queue):
     except Exception:
         pass
 
-    write_pose(yaw=0, pitch=0, zoom=1.0, moveX=0, moveY=0, lookX=0, lookY=0, paused=False, stop=False, resetToken=time.time())
+    write_pose(yaw=0, pitch=0, zoom=1.0, moveX=0, moveY=0, moveZ=0, lookX=0, lookY=0, paused=False, stop=False, resetToken=time.time())
 
     # Write current quality settings so dit_stream picks them up
     try:
@@ -637,6 +637,19 @@ html,body{
 .joy-center .mini-info{
   font-size:10px;color:rgba(255,255,255,0.35);
 }
+.lift-controls{
+  display:flex;gap:6px;align-items:center;justify-content:center;
+  margin-top:6px;
+}
+.mini-lift-btn{
+  width:34px;height:34px;border-radius:999px;border:1px solid rgba(255,255,255,0.12);
+  background:rgba(40,40,48,0.9);color:#ddd;font-size:15px;font-weight:700;cursor:pointer;
+  backdrop-filter:blur(8px);
+}
+.mini-lift-btn:active,.mini-lift-btn.active{
+  background:rgba(81,207,102,0.18);border-color:rgba(81,207,102,0.45);color:#fff;
+}
+.home-btn{font-size:14px}
 
 /* ── Settings drawer ── */
 .drawer-handle{
@@ -901,6 +914,11 @@ html,body{
     <div class="joy-center">
       <div class="mini-info" id="sceneInfo">IMG_7643</div>
       <div class="mini-info" id="frameInfo">Frame 0</div>
+      <div class="lift-controls">
+        <button class="mini-lift-btn" id="upBtn" title="Move up">↑</button>
+        <button class="mini-lift-btn home-btn" id="homeBtn" title="Hold to return home">⌂</button>
+        <button class="mini-lift-btn" id="downBtn" title="Move down">↓</button>
+      </div>
     </div>
     <div class="joy-zone" id="joyR">
       <div class="joy-label">look</div>
@@ -1016,7 +1034,7 @@ const el={
   dot:$('dot'),statusText:$('statusText'),statusChip:$('statusChip'),
   fpsChip:$('fpsChip'),qualChip:$('qualChip'),recChip:$('recChip'),recTime:$('recTime'),
   timerChip:$('timerChip'),
-  playBtn:$('playBtn'),recBtn:$('recBtn'),
+  playBtn:$('playBtn'),recBtn:$('recBtn'),resetBtn:$('resetBtn'),homeBtn:$('homeBtn'),upBtn:$('upBtn'),downBtn:$('downBtn'),
   sceneInfo:$('sceneInfo'),frameInfo:$('frameInfo'),
   drawer:$('drawer'),backdrop:$('backdrop'),sceneStrip:$('sceneStrip'),
   toast:$('toast'),gpuLabel:$('gpuLabel'),gpuBtn:$('gpuBtn'),
@@ -1178,6 +1196,7 @@ function toggleRecord(){
 function resetView(){
   S.resetToken=Date.now();
   vpZoom=1.0;
+  _mx=0;_my=0;_mz=0;_lx=0;_ly=0;_pd=true;
   send({action:'reset',resetToken:S.resetToken});
 }
 
@@ -1189,7 +1208,7 @@ function armResetHold(){
     S.resetHoldTimer=null;
     if(!S.resetHoldArmed) return;
     el.resetBtn.textContent='↻';
-    toast('View reset', true);
+    toast('Returned to start', true);
     resetView();
   }, 900);
 }
@@ -1420,14 +1439,16 @@ class Joystick{
   }
 }
 
-let _mx=0,_my=0,_lx=0,_ly=0,_pd=false;
+let _mx=0,_my=0,_mz=0,_lx=0,_ly=0,_pd=false;
 setInterval(()=>{
-  if(!_pd)return;
+  const active = _pd || Math.abs(_mx)>0.01 || Math.abs(_my)>0.01 || Math.abs(_mz)>0.01 || Math.abs(_lx)>0.01 || Math.abs(_ly)>0.01 || Math.abs(vpZoom-1.0)>0.01;
+  if(!active)return;
   _pd=false;
   send({
     action:'pose',
     moveX:Math.round(_mx*100)/100,
     moveY:Math.round(_my*100)/100,
+    moveZ:Math.round(_mz*100)/100,
     lookX:Math.round(_lx*100)/100,
     lookY:Math.round(_ly*100)/100,
     zoom:Math.round(vpZoom*100)/100,
@@ -1449,14 +1470,27 @@ const jR=new Joystick('joyR','knobR',(x,y)=>{
 
 function bindResetButton(){
   const b=el.resetBtn;
-  if(!b) return;
-  ['mousedown','touchstart','pointerdown'].forEach(ev=>b.addEventListener(ev, armResetHold, {passive:false}));
-  ['mouseup','mouseleave','touchend','touchcancel','pointerup','pointercancel'].forEach(ev=>b.addEventListener(ev, cancelResetHold, {passive:false}));
+  const h=el.homeBtn;
+  [b,h].forEach(btn=>{
+    if(!btn) return;
+    ['mousedown','touchstart','pointerdown'].forEach(ev=>btn.addEventListener(ev, armResetHold, {passive:false}));
+    ['mouseup','mouseleave','touchend','touchcancel','pointerup','pointercancel'].forEach(ev=>btn.addEventListener(ev, cancelResetHold, {passive:false}));
+  });
+}
+
+function bindLiftButton(btn, value){
+  if(!btn) return;
+  const start = (e)=>{ if(e) e.preventDefault(); _mz=value; _pd=true; btn.classList.add('active'); };
+  const end = (e)=>{ if(e) e.preventDefault(); _mz=0; _pd=true; btn.classList.remove('active'); };
+  ['mousedown','touchstart','pointerdown'].forEach(ev=>btn.addEventListener(ev, start, {passive:false}));
+  ['mouseup','mouseleave','touchend','touchcancel','pointerup','pointercancel'].forEach(ev=>btn.addEventListener(ev, end, {passive:false}));
 }
 
 // ═══ Init ═══
 el.loading.classList.add('visible');
 bindResetButton();
+bindLiftButton(el.upBtn, 1);
+bindLiftButton(el.downBtn, -1);
 connect();
 </script>
 </body>
@@ -1617,7 +1651,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     await stitch_and_send(websocket)
 
                 elif action == "reset":
-                    write_pose(yaw=0, pitch=0, zoom=1.0, moveX=0, moveY=0, lookX=0, lookY=0, paused=False, stop=False, resetToken=msg.get("resetToken", time.time()))
+                    write_pose(yaw=0, pitch=0, zoom=1.0, moveX=0, moveY=0, moveZ=0, lookX=0, lookY=0, paused=False, stop=False, resetToken=msg.get("resetToken", time.time()))
 
                 elif action == "set_timer":
                     minutes = msg.get("minutes", 60)
@@ -1701,7 +1735,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 elif action == "pose":
                     write_pose(
-                        moveX=msg.get("moveX", 0), moveY=msg.get("moveY", 0),
+                        moveX=msg.get("moveX", 0), moveY=msg.get("moveY", 0), moveZ=msg.get("moveZ", 0),
                         lookX=msg.get("lookX", 0), lookY=msg.get("lookY", 0),
                         zoom=msg.get("zoom", 1.0),
                         resetToken=msg.get("resetToken"),

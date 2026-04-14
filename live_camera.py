@@ -248,11 +248,12 @@ def apply_joystick_to_c2w(base_c2w, yaw_rad, pitch_rad, zoom_factor, device):
     return c2w
 
 
-def apply_translation_to_c2w(c2w, strafe_offset, forward_offset, device):
-    """Translate camera in its local frame.
+def apply_translation_to_c2w(c2w, strafe_offset, forward_offset, vertical_offset, device):
+    """Translate camera using local strafing/forward plus world-up lift.
 
     strafe_offset moves along camera right vector.
     forward_offset moves along camera forward vector.
+    vertical_offset moves along world up.
     """
     moved = c2w.clone()
     R = moved[:3, :3]
@@ -260,8 +261,9 @@ def apply_translation_to_c2w(c2w, strafe_offset, forward_offset, device):
 
     right = R[:, 0]
     forward = R[:, 2]
+    world_up = torch.tensor([0.0, 1.0, 0.0], device=device, dtype=t.dtype)
 
-    t = t + right * strafe_offset + forward * forward_offset
+    t = t + right * strafe_offset + forward * forward_offset + world_up * vertical_offset
     moved[:3, 3] = t
     return moved
 
@@ -298,6 +300,7 @@ class LiveCamera:
         self.zoom_accum = 1.0
         self.strafe_accum = 0.0
         self.forward_accum = 0.0
+        self.vertical_accum = 0.0
         
         self.loaded = False
     
@@ -346,9 +349,10 @@ class LiveCamera:
         self.zoom_accum = 1.0
         self.strafe_accum = 0.0
         self.forward_accum = 0.0
+        self.vertical_accum = 0.0
     
     def render_block(self, block_start_frame, num_frames, yaw_input, pitch_input, zoom_input,
-                     move_x_input=0.0, move_y_input=0.0,
+                     move_x_input=0.0, move_y_input=0.0, move_z_input=0.0,
                      sensitivity=1.0, dt=0.18):
         """Render a block of frames from point clouds using joystick input.
         
@@ -378,10 +382,13 @@ class LiveCamera:
         # Left-stick translation in local camera frame
         strafe_rate = move_x_input * sensitivity * 0.04
         forward_rate = (-move_y_input) * sensitivity * 0.06
+        vertical_rate = move_z_input * sensitivity * 0.05
         self.strafe_accum += strafe_rate * dt * 10
         self.forward_accum += forward_rate * dt * 10
+        self.vertical_accum += vertical_rate * dt * 10
         self.strafe_accum = max(-2.5, min(2.5, self.strafe_accum))
         self.forward_accum = max(-3.0, min(3.0, self.forward_accum))
+        self.vertical_accum = max(-2.5, min(2.5, self.vertical_accum))
         
         # Clamp pitch to avoid gimbal lock
         self.pitch_accum = max(-math.pi / 3, min(math.pi / 3, self.pitch_accum))
@@ -408,6 +415,7 @@ class LiveCamera:
                 c2w,
                 self.strafe_accum,
                 self.forward_accum,
+                self.vertical_accum,
                 self.device,
             )
             

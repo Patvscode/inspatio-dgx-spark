@@ -357,8 +357,10 @@ def main():
         joystick_zoom = pose.get("zoom", 1.0)
         joystick_move_x = pose.get("moveX", 0)  # left stick = strafe
         joystick_move_y = pose.get("moveY", 0)  # left stick = dolly
+        joystick_move_z = pose.get("moveZ", 0)  # buttons = world-space rise/lower
         joystick_active = (abs(joystick_yaw) > 0.05 or abs(joystick_pitch) > 0.05 or
                            abs(joystick_move_x) > 0.05 or abs(joystick_move_y) > 0.05 or
+                           abs(joystick_move_z) > 0.05 or
                            abs(joystick_zoom - 1.0) > 0.03)
         
         if live_cam is not None and joystick_active:
@@ -370,7 +372,7 @@ def main():
                 render_video_block, mask_video_block = live_cam.render_block(
                     start_index * 3, live_rgb_frames,
                     joystick_yaw, joystick_pitch, joystick_zoom,
-                    joystick_move_x, joystick_move_y,
+                    joystick_move_x, joystick_move_y, joystick_move_z,
                 )
                 if render_video_block is not None:
                     # TAE encode the live-rendered frames
@@ -414,6 +416,7 @@ def main():
                 live_cam.pitch_accum *= 0.95
                 live_cam.strafe_accum *= 0.90
                 live_cam.forward_accum *= 0.90
+                live_cam.vertical_accum *= 0.90
                 live_cam.zoom_accum += (1.0 - live_cam.zoom_accum) * 0.15
         
         render_input = torch.cat([mask_block, render_block], dim=2)
