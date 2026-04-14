@@ -1,0 +1,28 @@
+{
+  "date": "2026-04-14T11:00:00-04:00",
+  "scene": "IMG_7643.mp4",
+  "result": "healthy_enough_to_wrap_for_this_proof_pass",
+  "evidence": {
+    "free_vram_line": "Free VRAM: 13.4 GB, low_memory=True",
+    "ready_seen": true,
+    "streaming_start": "Starting streaming: 25 blocks, 75 frames",
+    "live_status_before_stop": {
+      "status": "streaming",
+      "block": 1,
+      "frame": 2718,
+      "block_time": 0.69,
+      "fps": 4.33
+    },
+    "recent_log_summary": "steady streaming around 4.3-4.5 FPS with repeated looping",
+    "gpu_compute_apps_before_launch_mb": 39668,
+    "gpu_inspatio_worker_mb_during_run": 37207,
+    "host_ram_available_mb_during_run": 4997
+  },
+  "deliberately_not_changed": [
+    "wrapper logic",
+    "threshold policy",
+    "OOM automation",
+    ":18080 negotiation",
+    "architecture"
+  ]
+}
