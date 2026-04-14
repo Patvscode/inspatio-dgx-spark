@@ -98,6 +98,25 @@ def read_status():
         return {"status": "unknown"}
 
 
+def read_status_for_viewer():
+    """Return a UI-safe stream status.
+
+    The raw status.json can go stale after a crash or after a scene restart.
+    Surface that honestly to connected viewers instead of leaving the client on
+    an old optimistic state.
+    """
+    status = read_status()
+    ts = status.get("timestamp")
+    state = status.get("status", "unknown")
+    if ts:
+        age = time.time() - ts
+        if age > 15 and state not in ("stopped", "ended", "unknown"):
+            status = dict(status)
+            status["status"] = "stale"
+            status["age_seconds"] = round(age, 1)
+    return status
+
+
 def restore_llama_servers():
     try:
         subprocess.run(["systemctl", "--user", "start", "llama-main.service"],
@@ -1143,6 +1162,13 @@ function connect(){
       else if(s.includes('loading')||s.includes('warming')||s.includes('compil')){
         S.stopped=false;
         setStatus('off',s);el.loading.classList.add('visible');el.loadingText.textContent=s.replace(/_/g,' ');
+      }else if(s==='stale'){
+        S.stopped=false;
+        setStatus('off','stream stale');
+        if(!S.gotFirstFrame || Date.now()-S.lastFT>5000){
+          el.loading.classList.add('visible');
+          el.loadingText.textContent='Stream stalled, waiting for fresh frames...';
+        }
       }else{
         if(s==='stopped' || s==='ended') S.stopped=true;
         setStatus('off',s);
@@ -1854,7 +1880,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # Send initial state (scene + timer sync)
     try:
         await websocket.send_json({"type": "active_scene", "scene": session_state.get("active_scene", "IMG_7643.mp4")})
-        await websocket.send_json({"type": "status", "status": read_status().get("status", "unknown")})
+        await websocket.send_json({"type": "status", "status": read_status_for_viewer().get("status", "unknown")})
         # Sync server timer to client
         remaining = get_timer_remaining()
         await websocket.send_json({
@@ -1869,10 +1895,23 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Track scene generation to detect switches
     current_generation = session_state["scene_generation"]
+    last_status_sent = None
+    last_status_push = 0.0
 
     # Frame delivery loop
     while True:
         await asyncio.sleep(0.05)
+
+        now = time.time()
+        if now - last_status_push >= 0.5:
+            last_status_push = now
+            try:
+                viewer_status = read_status_for_viewer().get("status", "unknown")
+                if viewer_status != last_status_sent:
+                    await websocket.send_json({"type": "status", "status": viewer_status})
+                    last_status_sent = viewer_status
+            except Exception:
+                pass
 
         if paused:
             continue
