@@ -117,6 +117,13 @@ def read_status_for_viewer():
     return status
 
 
+def viewer_status_allows_frame_delivery(status=None):
+    """Only stream cached frames when the backend says they are still live."""
+    if status is None:
+        status = read_status_for_viewer()
+    return status.get("status") in {"streaming", "looping", "paused"}
+
+
 def restore_llama_servers():
     try:
         subprocess.run(["systemctl", "--user", "start", "llama-main.service"],
@@ -1949,16 +1956,16 @@ async def websocket_endpoint(websocket: WebSocket):
             except Exception:
                 pass
 
+        viewer_status = read_status_for_viewer()
+        if not viewer_status_allows_frame_delivery(viewer_status):
+            last_frame_idx = -1
+            continue
+
         # On first connect or after resync/scene-switch, find the latest frame via status.json
         if last_frame_idx == -1:
-            try:
-                with open(STATUS_FILE, 'r') as f:
-                    st = json.load(f)
-                frame_num = st.get("frame", 0)
-                if frame_num > 0:
-                    last_frame_idx = max(0, frame_num - 3)  # start a few behind latest
-            except Exception:
-                pass
+            frame_num = viewer_status.get("frame", 0)
+            if frame_num > 0:
+                last_frame_idx = max(0, frame_num - 3)  # start a few behind latest
             # Fallback: check if frame 0 exists
             if last_frame_idx == -1:
                 if os.path.exists(os.path.join(FRAMES_DIR, "frame_000000.jpg")):
