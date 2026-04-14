@@ -156,22 +156,25 @@ def stop_dit_stream():
     except Exception:
         pid = None
 
+    graceful_loops = 40  # allow up to ~20s for NCCL/process-group cleanup
+    kill_timeout = 30
+
     if pid:
         try:
             stop_cmd = (
                 f"if kill -0 {pid} 2>/dev/null; then "
                 f"kill -TERM {pid} 2>/dev/null || true; "
-                f"for _ in $(seq 1 16); do "
+                f"for _ in $(seq 1 {graceful_loops}); do "
                 f"kill -0 {pid} 2>/dev/null || break; "
                 f"sleep 0.5; "
                 f"done; "
-                f"if kill -0 {pid} 2>/dev/null; then kill -KILL {pid} 2>/dev/null || true; fi; "
+                f"if kill -0 {pid} 2>/dev/null; then echo '[STOP] dit_stream still alive after graceful wait, forcing kill' >&2; kill -KILL {pid} 2>/dev/null || true; fi; "
                 f"fi; "
                 f"rm -f /workspace/inspatio-world/interactive_io/dit_stream.pid"
             )
             subprocess.run(
                 ["docker", "exec", "inspatio-world", "bash", "-lc", stop_cmd],
-                timeout=15,
+                timeout=kill_timeout,
                 capture_output=True,
             )
         except Exception:
@@ -182,10 +185,10 @@ def stop_dit_stream():
                 [
                     "docker", "exec", "inspatio-world", "bash", "-lc",
                     "pkill -TERM -f dit_stream || true; "
-                    "for _ in $(seq 1 16); do pgrep -f dit_stream >/dev/null || break; sleep 0.5; done; "
-                    "pgrep -f dit_stream >/dev/null && pkill -KILL -f dit_stream || true"
+                    f"for _ in $(seq 1 {graceful_loops}); do pgrep -f dit_stream >/dev/null || break; sleep 0.5; done; "
+                    "if pgrep -f dit_stream >/dev/null; then echo '[STOP] dit_stream still alive after graceful wait, forcing kill' >&2; pkill -KILL -f dit_stream || true; fi"
                 ],
-                timeout=15,
+                timeout=kill_timeout,
                 capture_output=True,
             )
         except Exception:
