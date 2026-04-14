@@ -362,32 +362,46 @@ def main():
                            abs(joystick_zoom - 1.0) > 0.03)
         
         if live_cam is not None and joystick_active:
-            # Live rendering from point cloud with joystick control
-            render_video_block, mask_video_block = live_cam.render_block(
-                start_index, num_frame_per_block,
-                joystick_yaw, joystick_pitch, joystick_zoom,
-                joystick_move_x, joystick_move_y,
-            )
-            if render_video_block is not None:
-                # TAE encode the live-rendered frames
-                with torch.no_grad():
-                    rv = render_video_block.permute(0, 2, 1, 3, 4)  # b c t h w -> b t c h w
-                    rv = ((rv * 0.5 + 0.5).clamp(0, 1)).to(torch.float16)
-                    render_block = tae_model.encode_video(rv, show_progress_bar=False).to(torch.bfloat16)
-                    
-                    # Mask: downsample to latent size
-                    mv = mask_video_block  # [1, 1, T, H, W]
-                    mv = rearrange(mv, 'b c t h w -> (b t) c h w')
-                    mv = torch.nn.functional.interpolate(mv, size=(lat_h, lat_w), mode='bilinear', align_corners=False)
-                    mv = rearrange(mv, '(b t) c h w -> b t c h w', b=1)
-                    # Pad: replicate first frame 4x, then concat rest (matching convert_mask_video)
-                    mv_padded = torch.cat([mv[:, 0:1].repeat(1, 4, 1, 1, 1), mv[:, 1:]], dim=1)
-                    # Trim to divisible by 4
-                    trim = mv_padded.shape[1] - mv_padded.shape[1] % 4
-                    mv_padded = mv_padded[:, :trim]
-                    mask_block = mv_padded.view(1, mv_padded.shape[1] // 4, 4, lat_h, lat_w)
-            else:
-                # Fallback to pre-baked
+            # Live rendering from point cloud with joystick control.
+            # TAEHV compresses roughly 3 RGB frames -> 1 latent frame, so to drive
+            # a 3-latent streaming block we must render 9 RGB frames here.
+            try:
+                live_rgb_frames = num_frame_per_block * 3
+                render_video_block, mask_video_block = live_cam.render_block(
+                    start_index * 3, live_rgb_frames,
+                    joystick_yaw, joystick_pitch, joystick_zoom,
+                    joystick_move_x, joystick_move_y,
+                )
+                if render_video_block is not None:
+                    # TAE encode the live-rendered frames
+                    with torch.no_grad():
+                        rv = render_video_block.permute(0, 2, 1, 3, 4)  # b c t h w -> b t c h w
+                        rv = ((rv * 0.5 + 0.5).clamp(0, 1)).to(torch.float16)
+                        render_block = tae_model.encode_video(rv, show_progress_bar=False).to(torch.bfloat16)
+
+                        # Match the streaming block length expected by the generator
+                        if render_block.shape[1] != num_frame_per_block:
+                            print(f"[CAMERA] Encoded live render produced {render_block.shape[1]} latent frames, expected {num_frame_per_block}", flush=True)
+                            render_block = render_latent[:, start_index:start_index + num_frame_per_block]
+
+                        # Mask: downsample to latent size
+                        mv = mask_video_block  # [1, 1, T, H, W]
+                        mv = rearrange(mv, 'b c t h w -> (b t) c h w')
+                        mv = torch.nn.functional.interpolate(mv, size=(lat_h, lat_w), mode='bilinear', align_corners=False)
+                        mv = rearrange(mv, '(b t) c h w -> b t c h w', b=1)
+                        # Pad: replicate first frame 4x, then concat rest (matching convert_mask_video)
+                        mv_padded = torch.cat([mv[:, 0:1].repeat(1, 4, 1, 1, 1), mv[:, 1:]], dim=1)
+                        trim = mv_padded.shape[1] - mv_padded.shape[1] % 4
+                        mv_padded = mv_padded[:, :trim]
+                        mask_block = mv_padded.view(1, mv_padded.shape[1] // 4, 4, lat_h, lat_w)
+                        if mask_block.shape[1] != num_frame_per_block:
+                            print(f"[CAMERA] Encoded live mask produced {mask_block.shape[1]} latent frames, expected {num_frame_per_block}", flush=True)
+                            mask_block = mask_latent[:, start_index:start_index + num_frame_per_block]
+                else:
+                    render_block = render_latent[:, start_index:start_index + num_frame_per_block]
+                    mask_block = mask_latent[:, start_index:start_index + num_frame_per_block]
+            except Exception as e:
+                print(f"[CAMERA] Live control fallback: {e}", flush=True)
                 render_block = render_latent[:, start_index:start_index + num_frame_per_block]
                 mask_block = mask_latent[:, start_index:start_index + num_frame_per_block]
         else:
