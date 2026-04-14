@@ -1620,19 +1620,32 @@ async def get_thumbnail(name: str):
 
 @app.post("/upload_video")
 async def upload_video(file: UploadFile = File(...)):
+    dest = None
     try:
         safe_name = sanitize_upload_name(file.filename)
         stem = safe_name.rsplit('.', 1)[0]
-        content = await file.read()
-        if not content:
-            return JSONResponse({"detail": "Empty upload"}, status_code=400)
 
         clear_scene_artifacts(stem, keep_video=False, keep_thumb=False)
 
         dest = os.path.join(USER_INPUT, safe_name)
+        total_bytes = 0
+        chunk_size = 1024 * 1024
         with open(dest, 'wb') as f:
-            f.write(content)
-        size_mb = len(content) / (1024 * 1024)
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                f.write(chunk)
+
+        if total_bytes <= 0:
+            try:
+                os.remove(dest)
+            except Exception:
+                pass
+            return JSONResponse({"detail": "Empty upload"}, status_code=400)
+
+        size_mb = total_bytes / (1024 * 1024)
         print(f"[UPLOAD] {safe_name} ({size_mb:.1f} MB)")
 
         # Convert non-mp4 to mp4 (pipeline only reads .mp4)
@@ -1650,6 +1663,7 @@ async def upload_video(file: UploadFile = File(...)):
                 dest = mp4_dest
                 print(f"[UPLOAD] Converted to mp4")
             else:
+                clear_scene_artifacts(stem, keep_video=False, keep_thumb=False)
                 err = (conv.stderr or conv.stdout or b'')[-200:]
                 return JSONResponse({"detail": f"Video conversion failed: {err.decode('utf-8', 'ignore')}"}, status_code=500)
 
@@ -1664,9 +1678,24 @@ async def upload_video(file: UploadFile = File(...)):
             thumb_ok = False
         return {"message": f"Uploaded {safe_name} ({size_mb:.1f} MB)", "file": safe_name, "thumbnail": thumb_ok}
     except PermissionError:
+        if dest and os.path.exists(dest):
+            try:
+                os.remove(dest)
+            except Exception:
+                pass
         return JSONResponse({"detail": "Permission denied"}, status_code=500)
     except Exception as e:
+        if dest and os.path.exists(dest):
+            try:
+                os.remove(dest)
+            except Exception:
+                pass
         return JSONResponse({"detail": str(e)[:200]}, status_code=500)
+    finally:
+        try:
+            await file.close()
+        except Exception:
+            pass
 
 
 @app.get("/api/library")
