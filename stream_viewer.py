@@ -1897,6 +1897,7 @@ async def websocket_endpoint(websocket: WebSocket):
     current_generation = session_state["scene_generation"]
     last_status_sent = None
     last_status_push = 0.0
+    last_timer_sync_push = 0.0
 
     # Frame delivery loop
     while True:
@@ -1927,8 +1928,11 @@ async def websocket_endpoint(websocket: WebSocket):
             end_session_cleanup()
             break
 
-        # Send timer sync every ~5 seconds (every 100 frames at 50ms interval)
-        if remaining > 0 and int(time.time()) % 5 == 0:
+        # Send timer sync at most once every 5 seconds.
+        # The old wall-clock modulo check could emit many duplicate syncs
+        # during the same second, which adds avoidable websocket chatter.
+        if remaining > 0 and (now - last_timer_sync_push) >= 5.0:
+            last_timer_sync_push = now
             try:
                 await websocket.send_json({"type": "timer_sync", "remaining_seconds": remaining, "minutes_setting": session_state["timer_minutes"]})
             except Exception:
