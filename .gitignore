@@ -23,3 +23,11 @@ dist/
 build/
 *.so
 .env
+
+# Large data files
+user_input/
+output/
+*.ply
+checkpoints/
+__pycache__/
+*.pyc
