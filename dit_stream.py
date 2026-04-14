@@ -257,13 +257,42 @@ def main():
     
     # Prepare tensors
     render_videos_ori = batch["render_video"].unsqueeze(0).to(device, dtype=torch.bfloat16)
-    render_videos_ori = rearrange(render_videos_ori, 'b t c h w -> b c t h w')
     mask_videos_ori = batch["mask_video"].unsqueeze(0).to(device, dtype=torch.bfloat16)
-    mask_videos_ori = rearrange(mask_videos_ori, 'b t c h w -> b c t h w')
-    
-    text_prompts = [batch["text"]] if isinstance(batch["text"], str) else batch["text"]
-    
     source_video = batch["source_video"].unsqueeze(0).to(device, dtype=torch.bfloat16)
+
+    def resize_video_btchw(video, target_h, target_w, mode="bilinear"):
+        b, t, c, h, w = video.shape
+        if (h, w) == (target_h, target_w):
+            return video
+        video_4d = rearrange(video, 'b t c h w -> (b t) c h w')
+        video_4d = torch.nn.functional.interpolate(
+            video_4d,
+            size=(target_h, target_w),
+            mode=mode,
+            align_corners=False if mode in ("bilinear", "bicubic") else None,
+        )
+        return rearrange(video_4d, '(b t) c h w -> b t c h w', b=b, t=t)
+
+    render_hw = tuple(render_videos_ori.shape[-2:])
+    mask_hw = tuple(mask_videos_ori.shape[-2:])
+    source_hw = tuple(source_video.shape[-2:])
+    target_hw = (init_h, init_w)
+
+    if render_hw != target_hw:
+        print(f"[SCENE] Resizing pre-rendered video from {render_hw[0]}x{render_hw[1]} to {init_h}x{init_w} for stream compatibility", flush=True)
+        render_videos_ori = resize_video_btchw(render_videos_ori, init_h, init_w, mode="bilinear")
+    if mask_hw != target_hw:
+        print(f"[SCENE] Resizing pre-rendered mask from {mask_hw[0]}x{mask_hw[1]} to {init_h}x{init_w} for stream compatibility", flush=True)
+        mask_videos_ori = resize_video_btchw(mask_videos_ori, init_h, init_w, mode="nearest")
+    if source_hw != target_hw:
+        print(f"[SCENE] Resizing source video from {source_hw[0]}x{source_hw[1]} to {init_h}x{init_w} to keep latent sizes aligned", flush=True)
+        source_video = resize_video_btchw(source_video, init_h, init_w, mode="bilinear")
+
+    render_videos_ori = rearrange(render_videos_ori, 'b t c h w -> b c t h w')
+    mask_videos_ori = rearrange(mask_videos_ori, 'b t c h w -> b c t h w')
+
+    text_prompts = [batch["text"]] if isinstance(batch["text"], str) else batch["text"]
+
     source_video = rearrange(source_video, 'b t c h w -> b c t h w')
     
     # ── Live Camera Setup ──
