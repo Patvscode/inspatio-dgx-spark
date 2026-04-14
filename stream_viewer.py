@@ -1085,9 +1085,8 @@ function connect(){
   S.ws=new WebSocket(`${p}//${location.host}/ws`);
 
   S.ws.onopen=()=>{
-    setStatus('live','streaming');
-    S.stopped=false;
-    // On reconnect after tab suspend, reset frame tracking so glob fallback finds current frames
+    setStatus('off','connecting');
+    // Wait for server status sync before claiming live streaming.
     if(S.gotFirstFrame){
       el.loading.classList.add('visible');el.loadingText.textContent='Resuming...';
       setTimeout(()=>send({action:'resync'}),200);
@@ -1114,11 +1113,21 @@ function connect(){
 
     if(d.type==='status'){
       const s=d.status||'unknown';
-      if(s==='streaming')setStatus('live','streaming');
-      else if(s==='paused')setStatus('paused','paused');
+      if(s==='streaming'){
+        S.stopped=false;
+        setStatus('live','streaming');
+      }
+      else if(s==='paused'){
+        S.stopped=false;
+        setStatus('paused','paused');
+      }
       else if(s.includes('loading')||s.includes('warming')||s.includes('compil')){
+        S.stopped=false;
         setStatus('off',s);el.loading.classList.add('visible');el.loadingText.textContent=s.replace(/_/g,' ');
-      }else setStatus('off',s);
+      }else{
+        if(s==='stopped' || s==='ended') S.stopped=true;
+        setStatus('off',s);
+      }
     }
 
     if(d.type==='download'){
@@ -1826,6 +1835,7 @@ async def websocket_endpoint(websocket: WebSocket):
     # Send initial state (scene + timer sync)
     try:
         await websocket.send_json({"type": "active_scene", "scene": session_state.get("active_scene", "IMG_7643.mp4")})
+        await websocket.send_json({"type": "status", "status": read_status().get("status", "unknown")})
         # Sync server timer to client
         remaining = get_timer_remaining()
         await websocket.send_json({
