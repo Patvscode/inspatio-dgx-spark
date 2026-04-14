@@ -98,6 +98,56 @@ def read_status():
         return {"status": "unknown"}
 
 
+_liveness_cache = {"checked_at": 0.0, "pid": None, "alive": None}
+
+
+def write_viewer_status(status, **kwargs):
+    data = {"status": status, "timestamp": time.time(), **kwargs}
+    try:
+        with open(STATUS_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+    return data
+
+
+def dit_process_alive(pid=None, cache_ttl=3.0):
+    """Best-effort liveness check for the containerized DiT worker."""
+    now = time.time()
+    cached_pid = _liveness_cache.get("pid")
+    cached_alive = _liveness_cache.get("alive")
+    checked_at = _liveness_cache.get("checked_at", 0.0)
+    if pid and cached_pid == pid and cached_alive is not None and (now - checked_at) < cache_ttl:
+        return cached_alive
+
+    if not pid:
+        try:
+            if os.path.exists(DIT_PID_FILE):
+                with open(DIT_PID_FILE, 'r') as f:
+                    pid = f.read().strip()
+        except Exception:
+            pid = None
+
+    if not pid:
+        _liveness_cache.update({"checked_at": now, "pid": None, "alive": False})
+        return False
+
+    alive = False
+    try:
+        result = subprocess.run(
+            ["docker", "exec", "inspatio-world", "bash", "-lc", f"kill -0 {pid} 2>/dev/null"],
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+        alive = (result.returncode == 0)
+    except Exception:
+        alive = False
+
+    _liveness_cache.update({"checked_at": now, "pid": pid, "alive": alive})
+    return alive
+
+
 def read_status_for_viewer():
     """Return a UI-safe stream status.
 
@@ -110,10 +160,19 @@ def read_status_for_viewer():
     state = status.get("status", "unknown")
     if ts:
         age = time.time() - ts
-        if age > 15 and state not in ("stopped", "ended", "unknown"):
-            status = dict(status)
-            status["status"] = "stale"
-            status["age_seconds"] = round(age, 1)
+        if age > 15 and state not in ("stopped", "ended", "unknown", "crashed", "stale"):
+            pid = None
+            try:
+                if os.path.exists(DIT_PID_FILE):
+                    with open(DIT_PID_FILE, 'r') as f:
+                        pid = f.read().strip()
+            except Exception:
+                pid = None
+
+            if state in ("streaming", "loading_scene", "encoding", "warming_up", "camera_ready", "ready") and not dit_process_alive(pid):
+                status = write_viewer_status("crashed", previous_status=state, age_seconds=round(age, 1))
+            else:
+                status = write_viewer_status("stale", previous_status=state, age_seconds=round(age, 1))
     return status
 
 
@@ -1179,6 +1238,11 @@ function connect(){
           el.loading.classList.add('visible');
           el.loadingText.textContent='Stream stalled, waiting for fresh frames...';
         }
+      }else if(s==='crashed'){
+        S.stopped=true;
+        setStatus('off','stream crashed');
+        el.loading.classList.add('visible');
+        el.loadingText.textContent='Stream process stopped. Reload the scene to restart it.';
       }else{
         if(s==='stopped' || s==='ended') S.stopped=true;
         setStatus('off',s);
