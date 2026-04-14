@@ -1,0 +1,37 @@
+--- a/scripts/render_point_cloud.py
++++ b/scripts/render_point_cloud.py
+@@ -23,7 +23,7 @@
+ 
+ import cv2
+ import numpy as np
+-import open3d as o3d
++from plyfile import PlyData
+ import torch
+ 
+ # Add project root to path for imports
+@@ -42,13 +42,21 @@ _splat_offset_cache = {}
+ 
+ 
+ def load_ply_data(ply_path, device):
+-    """Load point cloud from PLY file. Returns (points, colors) tensors."""
+-    pcd = o3d.io.read_point_cloud(ply_path)
+-    if not pcd.has_points():
++    """Load point cloud from PLY file. Returns (points, colors) tensors.
++    Uses plyfile instead of open3d for ARM64 compatibility."""
++    plydata = PlyData.read(ply_path)
++    vertex = plydata['vertex']
++    if len(vertex) == 0:
+         logger.warning(f"Point cloud has no points: {ply_path}")
+         return None, None
+-    pts = np.asarray(pcd.points, dtype=np.float32)
+-    colors = np.asarray(pcd.colors, dtype=np.float32)
++    pts = np.stack([vertex['x'], vertex['y'], vertex['z']], axis=-1).astype(np.float32)
++    # Colors may be 0-255 uint8 or 0-1 float
++    if 'red' in vertex:
++        r, g, b = vertex['red'], vertex['green'], vertex['blue']
++        colors = np.stack([r, g, b], axis=-1).astype(np.float32)
++        if colors.max() > 1.0:
++            colors /= 255.0
++    else:
++        colors = np.ones_like(pts) * 0.5  # default gray
+     return torch.from_numpy(pts).to(device), torch.from_numpy(colors).to(device)

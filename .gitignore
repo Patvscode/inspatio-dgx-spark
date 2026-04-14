@@ -1,0 +1,14 @@
+# InSpatio-World repo (cloned during setup)
+inspatio-world/
+
+# Docker
+*.tar
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
