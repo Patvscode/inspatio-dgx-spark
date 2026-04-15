@@ -50,6 +50,20 @@ session_state = {
 }
 
 
+def load_quality_state():
+    try:
+        with open(os.path.join(IO_DIR, "quality.json"), 'r') as f:
+            data = json.load(f)
+        quality = data.get("quality")
+        steps = data.get("steps")
+        if quality in {"scout", "draft", "full"}:
+            session_state["quality"] = quality
+        if isinstance(steps, int) and steps in {2, 3, 4}:
+            session_state["steps"] = steps
+    except Exception:
+        pass
+
+
 def start_server_timer(minutes):
     """Start or restart the server-side session timer."""
     session_state["timer_minutes"] = minutes
@@ -578,6 +592,8 @@ except Exception:
     pass
 if not session_state["active_scene"]:
     session_state["active_scene"] = "IMG_7643.mp4"
+
+load_quality_state()
 
 threading.Thread(target=generate_thumbnails, daemon=True).start()
 
@@ -1312,6 +1328,13 @@ function connect(){
     if(d.type==='timer_sync'){
       syncTimer(d.remaining_seconds, d.minutes_setting);
     }
+    if(d.type==='quality_sync'){
+      if(d.quality) S.quality=d.quality;
+      if(Number.isInteger(d.steps)) S.steps=d.steps;
+      document.querySelectorAll('#qualPills .pill').forEach(p=>p.classList.toggle('active',p.dataset.q===S.quality));
+      document.querySelectorAll('#stepPills .pill').forEach(p=>p.classList.toggle('active',parseInt(p.dataset.s)===S.steps));
+      updateQualChip();
+    }
     if(d.type==='timer_expired'){
       S.stopped=true;S.paused=false;
       el.playBtn.textContent='■';el.playBtn.classList.add('stopped');
@@ -2007,6 +2030,11 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         await websocket.send_json({"type": "active_scene", "scene": session_state.get("active_scene", "IMG_7643.mp4")})
         await websocket.send_json({"type": "status", "status": read_status_for_viewer().get("status", "unknown")})
+        await websocket.send_json({
+            "type": "quality_sync",
+            "quality": session_state.get("quality", "scout"),
+            "steps": session_state.get("steps", 2),
+        })
         # Sync server timer to client
         remaining = get_timer_remaining()
         await websocket.send_json({
