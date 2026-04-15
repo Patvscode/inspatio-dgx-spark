@@ -107,7 +107,9 @@ def end_session_cleanup():
     stop_dit_stream()
     restore_llama_servers()
     session_state["running"] = False
+    session_state["paused"] = False
     session_state["timer_end"] = None
+    session_state["timer_started"] = None
 
 
 def write_pose(**kwargs):
@@ -435,6 +437,8 @@ def _do_restart_dit(video_file, video_name, status, progress_queue):
     status("Starting stream with new scene...")
     session_state["active_scene"] = video_file
     session_state["scene_generation"] += 1
+    session_state["running"] = True
+    session_state["paused"] = False
 
     # Start the session countdown when a real stream session starts, not when
     # the lightweight viewer process merely boots or reconnects.
