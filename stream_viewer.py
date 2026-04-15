@@ -2093,9 +2093,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 break
 
     # Send initial state (scene + timer sync)
+    initial_status = "unknown"
     try:
         await websocket.send_json({"type": "active_scene", "scene": session_state.get("active_scene", "IMG_7643.mp4")})
-        await websocket.send_json({"type": "status", "status": read_status_for_viewer().get("status", "unknown")})
+        initial_status = read_status_for_viewer().get("status", "unknown")
+        await websocket.send_json({"type": "status", "status": initial_status})
         await websocket.send_json({
             "type": "quality_sync",
             "quality": session_state.get("quality", "scout"),
@@ -2115,7 +2117,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     # Track scene generation to detect switches
     current_generation = session_state["scene_generation"]
-    last_status_sent = None
+    last_status_sent = initial_status
     last_status_push = 0.0
     last_timer_sync_push = 0.0
 
