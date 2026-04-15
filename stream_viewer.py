@@ -419,6 +419,14 @@ def _do_restart_dit(video_file, video_name, status, progress_queue):
     session_state["active_scene"] = video_file
     session_state["scene_generation"] += 1
 
+    # Start the session countdown when a real stream session starts, not when
+    # the lightweight viewer process merely boots or reconnects.
+    if session_state.get("timer_minutes", 0) > 0:
+        start_server_timer(session_state["timer_minutes"])
+    else:
+        session_state["timer_end"] = None
+        session_state["timer_started"] = None
+
     # Clean frames
     try:
         subprocess.run(["find", FRAMES_DIR, "-name", "*.jpg", "-delete"],
@@ -597,8 +605,10 @@ load_quality_state()
 
 threading.Thread(target=generate_thumbnails, daemon=True).start()
 
-# Start server-side timer (default 60 min)
-start_server_timer(60)
+# Keep the default timer setting, but do not start counting down until a real
+# stream session begins.
+session_state["timer_end"] = None
+session_state["timer_started"] = None
 
 
 # ══════════════════════════════════════════════════════════════════════
