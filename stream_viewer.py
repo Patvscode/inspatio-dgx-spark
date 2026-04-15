@@ -1757,6 +1757,22 @@ async def get_status_json():
     return JSONResponse(read_status_for_viewer())
 
 
+@app.get("/health")
+@app.get("/api/health")
+async def get_health():
+    """Expose a cheap machine-readable health summary for monitors."""
+    status = read_status_for_viewer()
+    state = status.get("status", "unknown")
+    level = "ok" if state in {"streaming", "looping", "paused", "ready", "camera_ready", "warming_up", "loading_scene", "encoding", "stopped", "ended"} else "degraded"
+    return JSONResponse({
+        "ok": level == "ok",
+        "level": level,
+        "viewer": "up",
+        "stream_status": state,
+        "status": status,
+    })
+
+
 @app.get("/thumb/{name}")
 async def get_thumbnail(name: str):
     path = os.path.join(THUMBS_DIR, name)
