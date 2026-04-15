@@ -1751,6 +1751,12 @@ async def index():
     return HTML_PAGE
 
 
+@app.get("/interactive_io/status.json")
+async def get_status_json():
+    """Expose viewer-safe status at the legacy monitor path."""
+    return JSONResponse(read_status_for_viewer())
+
+
 @app.get("/thumb/{name}")
 async def get_thumbnail(name: str):
     path = os.path.join(THUMBS_DIR, name)
