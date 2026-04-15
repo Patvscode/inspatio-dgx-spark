@@ -30,6 +30,7 @@ THUMBS_DIR = os.path.join(IO_DIR, "thumbnails")
 USER_INPUT = os.path.join(HOST_DIR, "user_input")
 DIT_PID_FILE = os.path.join(IO_DIR, "dit_stream.pid")
 HEAVY_LAUNCH_REQUEST_FILE = os.path.join(IO_DIR, "heavy_launch_request.json")
+HEAVY_LAUNCH_STATE_FILE = os.path.join(IO_DIR, "heavy_launch_state.json")
 HEAVY_LAUNCH_SCRIPT = os.path.join(HOST_DIR, "scripts", "launch_heavy_stream.sh")
 PORT = 7861
 
@@ -161,6 +162,14 @@ def record_heavy_launch_request(video_file):
     return data
 
 
+def read_heavy_launch_state():
+    try:
+        with open(HEAVY_LAUNCH_STATE_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def launch_dit_stream(video_file):
     record_heavy_launch_request(video_file)
     return subprocess.run(
@@ -271,7 +280,7 @@ def read_status_for_viewer():
     ts = status.get("timestamp")
     state = status.get("status", "unknown")
     previous_state = status.get("previous_status")
-    active_states = {"streaming", "loading_scene", "encoding", "warming_up", "camera_ready", "ready"}
+    active_states = {"streaming", "loading_scene", "encoding", "warming_up", "camera_ready", "ready", "launching", "running", "degraded"}
 
     pid = None
     try:
@@ -307,8 +316,8 @@ def viewer_status_allows_frame_delivery(status=None):
 
 def restore_llama_servers():
     try:
-        subprocess.run(["systemctl", "--user", "start", "llama-main.service"],
-                       timeout=15, capture_output=True)
+        subprocess.run(["systemctl", "--user", "start", "gemma-e2b.service"],
+                       timeout=20, capture_output=True)
         session_state["servers_stopped"] = False
     except Exception:
         pass
@@ -316,9 +325,8 @@ def restore_llama_servers():
 
 def stop_llama_servers():
     try:
-        subprocess.run(["systemctl", "--user", "stop", "llama-main.service"],
-                       timeout=10, capture_output=True)
-        subprocess.run(["pkill", "-f", "llama-server"], timeout=5, capture_output=True)
+        subprocess.run(["systemctl", "--user", "stop", "gemma-e2b.service"],
+                       timeout=20, capture_output=True)
         session_state["servers_stopped"] = True
     except Exception:
         pass
@@ -378,6 +386,17 @@ def stop_dit_stream():
     try:
         if os.path.exists(DIT_PID_FILE):
             os.remove(DIT_PID_FILE)
+    except Exception:
+        pass
+
+    restore_llama_servers()
+
+    try:
+        launch_state = read_heavy_launch_state() or {}
+        if launch_state.get("status") in {"launching", "running", "degraded"}:
+            launch_state.update({"status": "stopped", "timestamp": time.time(), "restored_gemma": True})
+            with open(HEAVY_LAUNCH_STATE_FILE, 'w') as f:
+                json.dump(launch_state, f, indent=2)
     except Exception:
         pass
 
@@ -536,15 +555,22 @@ def _do_restart_dit(video_file, video_name, status, progress_queue):
     except Exception:
         pass
 
+    write_viewer_status("launching", scene=video_file)
     launch_result = launch_dit_stream(video_file)
-    if launch_result.returncode != 0:
+    launch_info = read_heavy_launch_state() or {}
+    launch_status = launch_info.get("status")
+
+    if launch_result.returncode != 0 or launch_status in {"denied", "crashed"}:
         session_state["processing_scene"] = None
-        error_msg = (launch_result.stderr or launch_result.stdout or "heavy launch wrapper failed").strip()
+        error_msg = (launch_info.get("reason") or launch_result.stderr or launch_result.stdout or "heavy launch wrapper failed").strip()
+        viewer_state = "denied" if launch_status == "denied" else "crashed"
         status(f"Failed to launch stream: {error_msg}")
         progress_queue.put({"type": "toast", "message": f"Launch failed: {error_msg}", "done": True, "error": True})
-        write_viewer_status("crashed", previous_status="loading_scene", error="launch_failed")
+        write_viewer_status(viewer_state, previous_status="loading_scene", error=error_msg)
         return
 
+    if launch_status == "degraded":
+        progress_queue.put({"type": "toast", "message": "Launching in degraded mode, :18081 temporarily gated", "done": False, "error": False})
     status("\u2705 Scene loaded! Model warming up (~1-2 min)...")
     progress_queue.put({"type": "toast", "message": "\u2705 Ready! Warming up model...", "done": True, "error": False})
     session_state["processing_scene"] = None

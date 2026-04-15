@@ -50,3 +50,23 @@
   - restarted `inspatio-stream-viewer.service`, re-verified HTTP `200`, websocket responsiveness, and `status.json == stopped`
 - **Status:** Done and validated without launching a new heavy render.
 - **Next step:** Use this wrapper as the seam for a later preflight/policy layer, keeping threshold logic separate until the wrapper shape settles.
+
+## 2026-04-15 18:15 EDT — Wrapper hardening: truthful preflight + gemma restore
+- **Goal:** Make the existing launch wrapper actually enforce the smallest safe preflight/cleanup contract without widening scope.
+- **What changed:** Added preflight checks for protected prerequisites (`llama-main.service` / `:18080`, OpenClaw gateway / `:18789`), deny-on-unsafe behavior for duplicate heavy workers and broken prerequisites, optional `gemma-e2b.service` gating on `:18081`, background restore of `:18081` after worker exit, and truthful wrapper state recording in `interactive_io/heavy_launch_state.json`. Updated `stream_viewer.py` to surface `denied` vs `crashed`, mark `launching` before wrapper handoff, and restore the gateable lane during cleanup.
+- **Why:** Finish the minimum real wrapper so heavy launch is protected, reversible, and auditable before any threshold policy exists.
+- **Files touched:**
+  - `stream_viewer.py`
+  - `scripts/launch_heavy_stream.sh`
+  - `reports/codex_turn_log.md`
+- **Important file locations:**
+  - wrapper state: `interactive_io/heavy_launch_state.json`
+  - wrapper request handoff: `interactive_io/heavy_launch_request.json`
+  - heavy launch wrapper: `scripts/launch_heavy_stream.sh`
+- **Validation:**
+  - `PYTHONPYCACHEPREFIX=/tmp/inspatio_pycache python3 -m py_compile stream_viewer.py`
+  - `bash -n scripts/launch_heavy_stream.sh`
+  - dry-run preflight returned truthful degraded state: `dry_run_preflight_ok_gemma_would_be_gated`
+  - force-cycled `inspatio-stream-viewer.service` and re-verified HTTP `200` on `:7861` and `/api/library`
+- **Status:** Done and validated at the wrapper/preflight level without adding thresholds or OOM policy.
+- **Next step:** Do one light validation/documentation pass on the wrapper behavior, then separately decide explicit threshold policy.
