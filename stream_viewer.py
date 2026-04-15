@@ -29,6 +29,8 @@ RECORD_DIR = os.path.join(IO_DIR, "recording")
 THUMBS_DIR = os.path.join(IO_DIR, "thumbnails")
 USER_INPUT = os.path.join(HOST_DIR, "user_input")
 DIT_PID_FILE = os.path.join(IO_DIR, "dit_stream.pid")
+HEAVY_LAUNCH_REQUEST_FILE = os.path.join(IO_DIR, "heavy_launch_request.json")
+HEAVY_LAUNCH_SCRIPT = os.path.join(HOST_DIR, "scripts", "launch_heavy_stream.sh")
 PORT = 7861
 
 app = FastAPI()
@@ -142,6 +144,36 @@ def write_viewer_status(status, **kwargs):
     except Exception:
         pass
     return data
+
+
+def record_heavy_launch_request(video_file):
+    data = {
+        "scene": video_file,
+        "quality": session_state.get("quality", "scout"),
+        "steps": session_state.get("steps", 2),
+        "requested_at": time.time(),
+    }
+    try:
+        with open(HEAVY_LAUNCH_REQUEST_FILE, 'w') as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+    return data
+
+
+def launch_dit_stream(video_file):
+    record_heavy_launch_request(video_file)
+    return subprocess.run(
+        [
+            HEAVY_LAUNCH_SCRIPT,
+            "--scene", video_file,
+            "--quality", str(session_state.get("quality", "scout")),
+            "--steps", str(session_state.get("steps", 2)),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def dit_process_alive(pid=None, cache_ttl=3.0):
@@ -504,18 +536,14 @@ def _do_restart_dit(video_file, video_name, status, progress_queue):
     except Exception:
         pass
 
-    dit_cmd = (
-        "cd /workspace/inspatio-world && "
-        "INSPATIO_USE_TORCH_COMPILE=0 "
-        "TORCH_CUDA_ARCH_LIST=12.1a "
-        "TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas "
-        "TORCHINDUCTOR_CACHE_DIR=/tmp/torchinductor_cache "
-        "python3 dit_stream.py > /workspace/inspatio-world/interactive_io/dit_stream.log 2>&1 & echo $! > /workspace/inspatio-world/interactive_io/dit_stream.pid"
-    )
-    subprocess.run(
-        ["docker", "exec", "inspatio-world", "bash", "-lc", dit_cmd],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False
-    )
+    launch_result = launch_dit_stream(video_file)
+    if launch_result.returncode != 0:
+        session_state["processing_scene"] = None
+        error_msg = (launch_result.stderr or launch_result.stdout or "heavy launch wrapper failed").strip()
+        status(f"Failed to launch stream: {error_msg}")
+        progress_queue.put({"type": "toast", "message": f"Launch failed: {error_msg}", "done": True, "error": True})
+        write_viewer_status("crashed", previous_status="loading_scene", error="launch_failed")
+        return
 
     status("\u2705 Scene loaded! Model warming up (~1-2 min)...")
     progress_queue.put({"type": "toast", "message": "\u2705 Ready! Warming up model...", "done": True, "error": False})

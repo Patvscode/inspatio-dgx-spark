@@ -30,3 +30,23 @@
 - **Deliberately not changed:** wrapper logic, threshold logic, OOM automation, `:18080` coordination, architecture.
 - **Status:** Proof pass succeeded; heavy path streamed and looped stably for the tested scene, with tight resource headroom.
 - **Next step:** Build the minimum heavy-launch wrapper only, using measured guardrails from this pass.
+
+## 2026-04-15 09:40 EDT — Minimum heavy-launch wrapper
+- **Goal:** Isolate heavy worker start behavior into one auditable launch path without adding threshold policy yet.
+- **What changed:** Moved the `dit_stream.py` spawn command behind `scripts/launch_heavy_stream.sh`, added a lightweight `interactive_io/heavy_launch_request.json` handoff record, and updated `stream_viewer.py` to use the wrapper and surface launch failures clearly.
+- **Why:** Make heavy startup easier to reason about, validate, and evolve without mixing in resource-policy logic too early.
+- **Files touched:**
+  - `stream_viewer.py`
+  - `scripts/launch_heavy_stream.sh`
+  - `reports/codex_turn_log.md`
+- **Important file locations:**
+  - viewer entrypoint: `stream_viewer.py`
+  - heavy launch wrapper: `scripts/launch_heavy_stream.sh`
+  - launch handoff record: `interactive_io/heavy_launch_request.json`
+- **Validation:**
+  - `python3 -m py_compile stream_viewer.py` with a temp pycache prefix
+  - `bash -n scripts/launch_heavy_stream.sh`
+  - `scripts/launch_heavy_stream.sh --scene ScreenRecording_04-14-2026_01-17-32_1.mp4 --quality scout --steps 2 --dry-run`
+  - restarted `inspatio-stream-viewer.service`, re-verified HTTP `200`, websocket responsiveness, and `status.json == stopped`
+- **Status:** Done and validated without launching a new heavy render.
+- **Next step:** Use this wrapper as the seam for a later preflight/policy layer, keeping threshold logic separate until the wrapper shape settles.
