@@ -1061,7 +1061,7 @@ html,body{
     <div class="spacer"></div>
     <button class="abtn abtn-rec" id="recBtn" onclick="toggleRecord()">●</button>
     <button class="abtn abtn-play" id="playBtn" onclick="togglePause()">⏸</button>
-    <button class="abtn abtn-sm" onclick="stopSession()">■</button>
+    <button class="abtn abtn-sm" title="Kill current session" aria-label="Kill current session" onclick="stopSession()">■</button>
     <div class="spacer"></div>
     <button class="abtn abtn-sm" id="resetBtn" title="Hold to reset">↻</button>
   </div>
@@ -1152,6 +1152,11 @@ html,body{
       <div class="gi" id="gpuLabel">GPU: InSpatio active</div>
       <button class="gpu-btn" id="gpuBtn" onclick="toggleGPU()">Free GPU</button>
     </div>
+  </div>
+
+  <div class="drawer-section">
+    <div class="drawer-label">Safety</div>
+    <button class="gpu-btn" style="width:100%;background:#5a1b1b;border-color:rgba(255,120,120,.35);color:#ffd7d7" onclick="stopSession()">Kill current session and free GPU</button>
   </div>
 </div>
 
@@ -1349,12 +1354,12 @@ function togglePause(){
 // ═══ Stop ═══
 function stopSession(){
   if(S.stopped)return;
-  if(!confirm('Stop InSpatio and free GPU?'))return;
+  if(!confirm('Kill the current InSpatio session and free GPU memory? You can start it again later.'))return;
   S.stopped=true;S.paused=false;
   send({action:'stop'});
   el.playBtn.textContent='■';el.playBtn.classList.add('stopped');
   el.canvas.classList.add('dimmed');
-  el.loading.classList.add('visible');el.loadingText.textContent='Stopped — GPU freed';
+  el.loading.classList.add('visible');el.loadingText.textContent='Session stopped — GPU freed';
   setStatus('off','stopped');
   clearInterval(S.timerInt);el.timerChip.textContent='DONE';
 }
