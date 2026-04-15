@@ -193,6 +193,41 @@ def dit_process_alive(pid=None, cache_ttl=3.0):
     return alive
 
 
+def get_latest_frame_info():
+    """Return freshness info for the newest rendered frame, if any."""
+    latest_path = None
+    latest_mtime = None
+    try:
+        for path in glob.iglob(os.path.join(FRAMES_DIR, "frame_*.jpg")):
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            if latest_mtime is None or mtime > latest_mtime:
+                latest_path = path
+                latest_mtime = mtime
+    except Exception:
+        return None
+
+    if latest_path is None or latest_mtime is None:
+        return None
+
+    name = os.path.basename(latest_path)
+    frame_idx = None
+    try:
+        frame_idx = int(name.rsplit("_", 1)[1].split(".", 1)[0])
+    except Exception:
+        frame_idx = None
+
+    return {
+        "path": latest_path,
+        "name": name,
+        "frame": frame_idx,
+        "mtime": latest_mtime,
+        "age_seconds": round(max(0.0, time.time() - latest_mtime), 1),
+    }
+
+
 def read_status_for_viewer():
     """Return a UI-safe stream status.
 
@@ -215,15 +250,19 @@ def read_status_for_viewer():
         pid = None
 
     if state == "stale" and previous_state in active_states and not dit_process_alive(pid):
-        return write_viewer_status("crashed", previous_status=previous_state, age_seconds=status.get("age_seconds"))
-
-    if ts:
+        status = write_viewer_status("crashed", previous_status=previous_state, age_seconds=status.get("age_seconds"))
+    elif ts:
         age = time.time() - ts
         if age > 15 and state not in ("stopped", "ended", "unknown", "crashed", "stale"):
             if state in active_states and not dit_process_alive(pid):
                 status = write_viewer_status("crashed", previous_status=state, age_seconds=round(age, 1))
             else:
                 status = write_viewer_status("stale", previous_status=state, age_seconds=round(age, 1))
+
+    frame_info = get_latest_frame_info()
+    if frame_info:
+        status = {**status, "latest_frame": frame_info}
+
     return status
 
 
@@ -1763,12 +1802,21 @@ async def get_health():
     """Expose a cheap machine-readable health summary for monitors."""
     status = read_status_for_viewer()
     state = status.get("status", "unknown")
+    frame_info = status.get("latest_frame") or {}
+    frame_age = frame_info.get("age_seconds")
+
     level = "ok" if state in {"streaming", "looping", "paused", "ready", "camera_ready", "warming_up", "loading_scene", "encoding", "stopped", "ended"} else "degraded"
+    if state in {"streaming", "looping", "paused"} and (frame_age is None or frame_age > 15):
+        level = "degraded"
+
     return JSONResponse({
         "ok": level == "ok",
         "level": level,
         "viewer": "up",
         "stream_status": state,
+        "frame_fresh": (frame_age is not None and frame_age <= 15),
+        "latest_frame_age_seconds": frame_age,
+        "latest_frame": frame_info,
         "status": status,
     })
 
