@@ -538,9 +538,14 @@ def main():
             print("Stop signal received. Exiting.", flush=True)
             break
         
-        # Pause loop — wait until unpaused
+        # Pause loop — wait until unpaused.
+        # Only emit paused status once per pause stretch so reconnect/status
+        # checks stay truthful without flooding the log or status file.
+        pause_reported = False
         while pose.get("paused", False):
-            write_status("paused", block=block_idx, frame=frame_counter)
+            if not pause_reported:
+                write_status("paused", block=block_idx, frame=frame_counter)
+                pause_reported = True
             time.sleep(0.5)
             pose = read_pose()
             if pose.get("stop", False):
