@@ -77,11 +77,28 @@ def start_server_timer(minutes):
 
 
 def get_timer_remaining():
-    """Get seconds remaining on server timer. Returns -1 for infinite."""
+    """Get seconds remaining on the active server timer. Returns -1 for infinite."""
     if session_state["timer_end"] is None:
         return -1
     remaining = session_state["timer_end"] - time.time()
     return max(0, remaining)
+
+
+def get_timer_display_seconds():
+    """Get viewer-facing timer seconds.
+
+    When a countdown has not started yet, show the selected duration instead of
+    pretending the session is infinite.
+    """
+    remaining = get_timer_remaining()
+    if remaining >= 0:
+        return remaining
+
+    minutes = session_state.get("timer_minutes", 0)
+    if minutes and not session_state.get("timer_started"):
+        return minutes * 60
+
+    return -1
 
 
 def end_session_cleanup():
@@ -1917,7 +1934,20 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 elif action == "set_timer":
                     minutes = msg.get("minutes", 60)
-                    start_server_timer(minutes)
+                    session_state["timer_minutes"] = minutes
+                    if minutes <= 0:
+                        session_state["timer_end"] = None
+                        session_state["timer_started"] = None
+                    elif session_state.get("running") and read_status_for_viewer().get("status") in {"streaming", "looping", "paused", "loading_scene", "encoding", "warming_up", "camera_ready", "ready"}:
+                        start_server_timer(minutes)
+                    else:
+                        session_state["timer_end"] = None
+                        session_state["timer_started"] = None
+                    await websocket.send_json({
+                        "type": "timer_sync",
+                        "remaining_seconds": get_timer_display_seconds(),
+                        "minutes_setting": session_state["timer_minutes"],
+                    })
 
                 elif action == "set_quality":
                     new_quality = msg.get("quality", session_state["quality"])
@@ -2046,7 +2076,7 @@ async def websocket_endpoint(websocket: WebSocket):
             "steps": session_state.get("steps", 2),
         })
         # Sync server timer to client
-        remaining = get_timer_remaining()
+        remaining = get_timer_display_seconds()
         await websocket.send_json({
             "type": "timer_sync",
             "remaining_seconds": remaining,
