@@ -70,3 +70,17 @@
   - force-cycled `inspatio-stream-viewer.service` and re-verified HTTP `200` on `:7861` and `/api/library`
 - **Status:** Done and validated at the wrapper/preflight level without adding thresholds or OOM policy.
 - **Next step:** Do one light validation/documentation pass on the wrapper behavior, then separately decide explicit threshold policy.
+
+## 2026-04-16 02:20 EDT — Wrapper validation + operator notes
+- **Goal:** Validate the hardened wrapper one more time under real current host conditions and write down the operator meaning of its states.
+- **What changed:** Added `interactive_io/heavy_launch_notes.md` documenting the wrapper contract, the existing 2026-04-15 validation, and a fresh 2026-04-16 dry-run validation result.
+- **Why:** Make it obvious whether a failed heavy start is a bad launch, a valid deny, or a post-launch crash before adding threshold policy.
+- **Files touched:**
+  - `interactive_io/heavy_launch_notes.md`
+  - `reports/codex_turn_log.md`
+- **Validation:**
+  - `scripts/launch_heavy_stream.sh --scene IMG_7643.mp4 --quality draft --steps 25 --dry-run`
+  - result was a truthful deny: `llama_main_service_inactive`
+  - confirmed supporting host state: gateway active on `:18789`, container up, `llama-main.service` failed, `gemma-e2b.service` failed, and neither `:18080` nor `:18081` listening
+- **Status:** Done. Wrapper behavior remains truthful; current blocker is prerequisite service readiness, not wrapper ambiguity.
+- **Next step:** If heavy use is needed again, restore the protected llama lane first, then re-run a controlled launch check before any threshold work.
