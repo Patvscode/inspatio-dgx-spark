@@ -307,6 +307,8 @@ def read_status_for_viewer():
     launch_status = launch_state.get("status")
     launch_reason = launch_state.get("reason")
     launch_ts = launch_state.get("timestamp")
+    launch_scene = launch_state.get("scene")
+    current_scene = status.get("scene") or session_state.get("active_scene")
     if launch_reason:
         status = {**status, "launch_reason": launch_reason}
     if (
@@ -316,6 +318,7 @@ def read_status_for_viewer():
         and launch_reason in {"operator_shutdown", "worker_exited_after_cleanup"}
         and launch_ts is not None
         and (ts is None or launch_ts >= ts)
+        and (not launch_scene or not current_scene or launch_scene == current_scene)
     ):
         status = {**status, "previous_status": None}
 
