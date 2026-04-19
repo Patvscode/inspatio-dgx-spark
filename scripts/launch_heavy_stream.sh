@@ -44,11 +44,33 @@ deny() {
   exit 3
 }
 
+detect_log_reason() {
+  local log_file="${1:-$LOG_FILE}"
+  if [[ ! -f "$log_file" ]]; then
+    return 1
+  fi
+
+  if tail -n 120 "$log_file" 2>/dev/null | grep -qiE 'CUDA error: out of memory|cudaErrorMemoryAllocation|torch\.OutOfMemoryError'; then
+    printf '%s' 'cuda_oom'
+    return 0
+  fi
+
+  return 1
+}
+
 crash() {
+  local reason="$1"
+  local gated="${2:-false}"
+  local pid="${3:-}"
+  local detected_reason=""
+  detected_reason="$(detect_log_reason || true)"
+  if [[ -n "$detected_reason" ]] && [[ "$reason" == "heavy_stream_pid_not_alive_after_launch" || "$reason" == "worker_exited" ]]; then
+    reason="${reason}:${detected_reason}"
+  fi
   if [[ "${GEMMA_GATED:-0}" -eq 1 ]]; then
     systemctl --user start gemma-e2b.service >/dev/null 2>&1 || true
   fi
-  json_emit "crashed" "$1" "${2:-false}" "${3:-}"
+  json_emit "crashed" "$reason" "$gated" "$pid"
   exit 1
 }
 
@@ -70,12 +92,14 @@ start_restore_watcher() {
   local pid="$1"
   local gated="$2"
   local launch_id="$3"
+  local log_file="$4"
   nohup bash -lc '
     ROOT_DIR="$1"
     STATE_FILE="$2"
     PID="$3"
     GATED="$4"
     LAUNCH_ID="$5"
+    LOG_FILE="$6"
     STATUS_FILE="$ROOT_DIR/interactive_io/status.json"
     while docker exec inspatio-world bash -lc "kill -0 \"$PID\" 2>/dev/null && cmd=\\$(tr '\''\\0'\'' '\'' '\'' < /proc/\"$PID\"/cmdline 2>/dev/null || true); case \"\\$cmd\" in *dit_stream.py*) exit 0 ;; *) exit 1 ;; esac" >/dev/null 2>&1; do
       sleep 2
@@ -83,9 +107,24 @@ start_restore_watcher() {
     if [[ "$GATED" == "1" ]]; then
       systemctl --user start gemma-e2b.service >/dev/null 2>&1 || true
     fi
-    python3 - "$STATE_FILE" "$STATUS_FILE" "$LAUNCH_ID" "$GATED" <<'"'"'PY'"'"'
+    python3 - "$STATE_FILE" "$STATUS_FILE" "$LAUNCH_ID" "$GATED" "$LOG_FILE" <<'"'"'PY'"'"'
 import json, os, sys, time
-state_file, status_file, launch_id, gated = sys.argv[1:5]
+state_file, status_file, launch_id, gated, log_file = sys.argv[1:6]
+
+def detect_reason(path):
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 16384))
+            tail = f.read().decode('utf-8', errors='ignore')
+    except Exception:
+        return None
+    lowered = tail.lower()
+    if 'cuda error: out of memory' in lowered or 'cudaerrormemoryallocation' in lowered or 'torch.outofmemoryerror' in lowered:
+        return 'worker_exited:cuda_oom'
+    return None
+
 try:
     with open(state_file, 'r') as f:
         data = json.load(f)
@@ -94,7 +133,7 @@ except Exception:
 if data.get('launch_id') != launch_id:
     raise SystemExit(0)
 status = 'crashed'
-reason = 'worker_exited'
+reason = detect_reason(log_file) or 'worker_exited'
 try:
     with open(status_file, 'r') as f:
         raw = json.load(f)
@@ -104,7 +143,7 @@ try:
         reason = 'worker_exited_after_cleanup'
     elif current == 'crashed':
         status = 'crashed'
-        reason = raw.get('error') or 'worker_crashed'
+        reason = raw.get('error') or detect_reason(log_file) or 'worker_crashed'
 except Exception:
     pass
 data.update({
@@ -117,7 +156,7 @@ data.update({
 with open(state_file, 'w') as f:
     json.dump(data, f, indent=2)
 PY
-  ' _ "$ROOT_DIR" "$STATE_FILE" "$pid" "$gated" "$launch_id" >/dev/null 2>&1 &
+  ' _ "$ROOT_DIR" "$STATE_FILE" "$pid" "$gated" "$launch_id" "$log_file" >/dev/null 2>&1 &
 }
 
 while [[ $# -gt 0 ]]; do
@@ -209,7 +248,7 @@ if ! container_pid_alive "$NEW_PID"; then
   crash "heavy_stream_pid_not_alive_after_launch" "$([[ "$GEMMA_GATED" -eq 1 ]] && echo true || echo false)" "$NEW_PID"
 fi
 
-start_restore_watcher "$NEW_PID" "$GEMMA_GATED" "$LAUNCH_ID"
+start_restore_watcher "$NEW_PID" "$GEMMA_GATED" "$LAUNCH_ID" "$LOG_FILE"
 
 if [[ "$GEMMA_GATED" -eq 1 ]]; then
   json_emit "degraded" "gemma_lane_temporarily_gated" true "$NEW_PID"
