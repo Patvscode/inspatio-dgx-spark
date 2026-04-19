@@ -38,6 +38,8 @@ interactive_io/thumbnails/
 interactive_io/status.json
 interactive_io/pose.json
 interactive_io/quality.json
+interactive_io/heavy_launch_request.json
+interactive_io/heavy_launch_state.json
 interactive_io/*.log
 interactive_io/*.pid
 user_input/*.mov

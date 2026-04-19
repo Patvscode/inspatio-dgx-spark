@@ -84,3 +84,20 @@
   - confirmed supporting host state: gateway active on `:18789`, container up, `llama-main.service` failed, `gemma-e2b.service` failed, and neither `:18080` nor `:18081` listening
 - **Status:** Done. Wrapper behavior remains truthful; current blocker is prerequisite service readiness, not wrapper ambiguity.
 - **Next step:** If heavy use is needed again, restore the protected llama lane first, then re-run a controlled launch check before any threshold work.
+
+## 2026-04-19 04:06 EDT — Viewer supervision recovery + runtime artifact cleanup
+- **Goal:** Restore the lightweight viewer path and remove recurring git noise from generated heavy-launch artifacts.
+- **What changed:** Re-enabled and started `inspatio-stream-viewer.service` on the host so the viewer stays up across future user-session starts, and added the generated `interactive_io/heavy_launch_request.json` / `interactive_io/heavy_launch_state.json` files to `.gitignore`.
+- **Why:** The morning health check found `:7861` fully down, with HTTP and websocket unavailable, even though the wrapper truth files were merely runtime artifacts. Restoring the viewer fixes the live control surface now, and ignoring those files keeps future stabilization wakes focused on real source deltas.
+- **Files touched:**
+  - `.gitignore`
+  - `reports/codex_turn_log.md`
+- **Validation:**
+  - `systemctl --user enable --now inspatio-stream-viewer.service`
+  - verified `systemctl --user status` showed `active (running)` and `enabled`
+  - verified HTTP `200` on `http://127.0.0.1:7861/`
+  - verified websocket responsiveness on `ws://127.0.0.1:7861/ws`
+  - verified `http://127.0.0.1:7861/interactive_io/status.json` returned `status=stopped`
+  - verified generated heavy-launch JSON files no longer appear as untracked repo noise
+- **Status:** Done and validated. Viewer supervision is back, and the repo surface is cleaner for future real fixes.
+- **Next step:** Keep the next wake focused on the actual heavy prerequisite path, especially restoring truthful first-time launch checks once the protected llama lane is available again.
