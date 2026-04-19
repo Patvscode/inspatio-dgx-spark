@@ -101,3 +101,18 @@
   - verified generated heavy-launch JSON files no longer appear as untracked repo noise
 - **Status:** Done and validated. Viewer supervision is back, and the repo surface is cleaner for future real fixes.
 - **Next step:** Keep the next wake focused on the actual heavy prerequisite path, especially restoring truthful first-time launch checks once the protected llama lane is available again.
+
+## 2026-04-19 06:09 EDT — Clear stale crash history after clean stop
+- **Goal:** Keep the viewer status honest when a prior crash marker lingers after a later clean operator stop.
+- **What changed:** Updated `stream_viewer.py` so `read_status_for_viewer()` now folds in `interactive_io/heavy_launch_state.json`, exposes `launch_reason`, and clears stale `previous_status: crashed` when a newer clean stop reason such as `operator_shutdown` or `worker_exited_after_cleanup` supersedes it. Added the same `launch_reason` to `/health`.
+- **Why:** The live viewer and websocket were up, but `status.json` was still surfacing an old crash shadow even though the heavy wrapper recorded a later clean stop. That made the control surface less honest than the real workflow state.
+- **Files touched:**
+  - `stream_viewer.py`
+  - `reports/codex_turn_log.md`
+- **Validation:**
+  - restarted `inspatio-stream-viewer.service`
+  - verified `http://127.0.0.1:7861/interactive_io/status.json` now reports `previous_status: null` and `launch_reason: operator_shutdown`
+  - verified `http://127.0.0.1:7861/health` includes `launch_reason: operator_shutdown`
+  - verified websocket bootstrap on `ws://127.0.0.1:7861/ws` still returns `active_scene`, `status`, and `quality_sync`
+- **Status:** Done and validated locally.
+- **Next step:** Push the validated commit once GitHub credentials are available, then keep the next wake aimed at real heavy-path health instead of stale status residue.

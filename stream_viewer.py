@@ -303,6 +303,22 @@ def read_status_for_viewer():
         else:
             status = write_viewer_status("stale", previous_status=state, age_seconds=age)
 
+    launch_state = read_heavy_launch_state() or {}
+    launch_status = launch_state.get("status")
+    launch_reason = launch_state.get("reason")
+    launch_ts = launch_state.get("timestamp")
+    if launch_reason:
+        status = {**status, "launch_reason": launch_reason}
+    if (
+        state in {"stopped", "ended"}
+        and previous_state == "crashed"
+        and launch_status == "stopped"
+        and launch_reason in {"operator_shutdown", "worker_exited_after_cleanup"}
+        and launch_ts is not None
+        and (ts is None or launch_ts >= ts)
+    ):
+        status = {**status, "previous_status": None}
+
     frame_info = get_latest_frame_info()
     if frame_info:
         status = {**status, "latest_frame": frame_info}
@@ -1882,6 +1898,7 @@ async def get_health():
         "viewer": "up",
         "stream_status": state,
         "previous_stream_status": previous_state,
+        "launch_reason": status.get("launch_reason"),
         "status_age_seconds": status_age,
         "active_scene": session_state.get("active_scene"),
         "quality": session_state.get("quality"),
