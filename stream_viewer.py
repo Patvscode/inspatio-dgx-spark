@@ -1859,11 +1859,20 @@ async def get_health():
     """Expose a cheap machine-readable health summary for monitors."""
     status = read_status_for_viewer()
     state = status.get("status", "unknown")
+    previous_state = status.get("previous_status")
+    status_age = status.get("age_seconds")
     frame_info = status.get("latest_frame") or {}
     frame_age = frame_info.get("age_seconds")
 
-    level = "ok" if state in {"streaming", "looping", "paused", "ready", "camera_ready", "warming_up", "loading_scene", "encoding", "stopped", "ended"} else "degraded"
+    ok_states = {"streaming", "looping", "paused", "ready", "camera_ready", "warming_up", "loading_scene", "encoding", "stopped", "ended"}
+    level = "ok" if state in ok_states else "degraded"
+
     if state in {"streaming", "looping", "paused"} and (frame_age is None or frame_age > 15):
+        level = "degraded"
+
+    # A stopped viewer can still hide the truth that the previous stream died.
+    # Surface that honestly so cron/monitors do not treat crash aftermath as green.
+    if state == "stopped" and previous_state == "crashed" and (status_age is None or status_age > 60):
         level = "degraded"
 
     return JSONResponse({
@@ -1871,7 +1880,8 @@ async def get_health():
         "level": level,
         "viewer": "up",
         "stream_status": state,
-        "status_age_seconds": status.get("age_seconds"),
+        "previous_stream_status": previous_state,
+        "status_age_seconds": status_age,
         "active_scene": session_state.get("active_scene"),
         "quality": session_state.get("quality"),
         "steps": session_state.get("steps"),
