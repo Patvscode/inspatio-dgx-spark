@@ -1871,8 +1871,9 @@ async def get_health():
         level = "degraded"
 
     # A stopped viewer can still hide the truth that the previous stream died.
-    # Surface that honestly so cron/monitors do not treat crash aftermath as green.
-    if state == "stopped" and previous_state == "crashed" and (status_age is None or status_age > 60):
+    # Surface that honestly for a short window so monitors catch crash aftermath,
+    # without leaving health permanently degraded days after an intentional stop.
+    if state == "stopped" and previous_state == "crashed" and (status_age is None or status_age <= 300):
         level = "degraded"
 
     return JSONResponse({
