@@ -290,15 +290,18 @@ def read_status_for_viewer():
     except Exception:
         pid = None
 
+    age = None
+    if ts:
+        age = round(max(0.0, time.time() - ts), 1)
+        status = {**status, "age_seconds": age}
+
     if state == "stale" and previous_state in active_states and not dit_process_alive(pid):
         status = write_viewer_status("crashed", previous_status=previous_state, age_seconds=status.get("age_seconds"))
-    elif ts:
-        age = time.time() - ts
-        if age > 15 and state not in ("stopped", "ended", "unknown", "crashed", "stale"):
-            if state in active_states and not dit_process_alive(pid):
-                status = write_viewer_status("crashed", previous_status=state, age_seconds=round(age, 1))
-            else:
-                status = write_viewer_status("stale", previous_status=state, age_seconds=round(age, 1))
+    elif age is not None and age > 15 and state not in ("stopped", "ended", "unknown", "crashed", "stale"):
+        if state in active_states and not dit_process_alive(pid):
+            status = write_viewer_status("crashed", previous_status=state, age_seconds=age)
+        else:
+            status = write_viewer_status("stale", previous_status=state, age_seconds=age)
 
     frame_info = get_latest_frame_info()
     if frame_info:
@@ -1868,6 +1871,7 @@ async def get_health():
         "level": level,
         "viewer": "up",
         "stream_status": state,
+        "status_age_seconds": status.get("age_seconds"),
         "active_scene": session_state.get("active_scene"),
         "quality": session_state.get("quality"),
         "steps": session_state.get("steps"),
