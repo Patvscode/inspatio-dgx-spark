@@ -326,6 +326,18 @@ def read_status_for_viewer():
     return status
 
 
+def viewer_status_payload(status=None):
+    """Return the websocket status payload with useful viewer context."""
+    if status is None:
+        status = read_status_for_viewer()
+    return {
+        "type": "status",
+        "status": status.get("status", "unknown"),
+        "previous_status": status.get("previous_status"),
+        "launch_reason": status.get("launch_reason"),
+    }
+
+
 def viewer_status_allows_frame_delivery(status=None):
     """Only stream cached frames when the backend says they are still live."""
     if status is None:
@@ -1402,6 +1414,7 @@ function connect(){
 
     if(d.type==='status'){
       const s=d.status||'unknown';
+      const launchReason=d.launch_reason||'';
       if(s==='streaming'){
         S.stopped=false;
         setStatus('live','streaming');
@@ -1425,8 +1438,14 @@ function connect(){
         setStatus('off','stream crashed');
         el.loading.classList.add('visible');
         el.loadingText.textContent='Stream process stopped. Reload the scene to restart it.';
+      }else if(s==='stopped' || s==='ended'){
+        S.stopped=true;
+        setStatus('off',s);
+        el.loading.classList.add('visible');
+        el.loadingText.textContent=(launchReason==='worker_exited_after_cleanup' || s==='ended')
+          ? 'Session ended cleanly. Pick a scene to start again.'
+          : 'Stream idle. Pick a scene to start it.';
       }else{
-        if(s==='stopped' || s==='ended') S.stopped=true;
         setStatus('off',s);
       }
     }
@@ -2083,7 +2102,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 elif action == "stop":
                     end_session_cleanup()
-                    await websocket.send_json({"type": "status", "status": "stopped"})
+                    await websocket.send_json(viewer_status_payload({"status": "stopped", "launch_reason": "operator_shutdown"}))
                     await websocket.send_json({"type": "toast", "message": "✅ Session ended. GPU freed, llama servers restored.", "done": True})
 
                 elif action == "start_record":
@@ -2235,8 +2254,9 @@ async def websocket_endpoint(websocket: WebSocket):
     initial_status = "unknown"
     try:
         await websocket.send_json({"type": "active_scene", "scene": session_state.get("active_scene", "IMG_7643.mp4")})
-        initial_status = read_status_for_viewer().get("status", "unknown")
-        await websocket.send_json({"type": "status", "status": initial_status})
+        initial_viewer_status = read_status_for_viewer()
+        initial_status = initial_viewer_status.get("status", "unknown")
+        await websocket.send_json(viewer_status_payload(initial_viewer_status))
         await websocket.send_json({
             "type": "quality_sync",
             "quality": session_state.get("quality", "scout"),
@@ -2268,10 +2288,11 @@ async def websocket_endpoint(websocket: WebSocket):
         if now - last_status_push >= 0.5:
             last_status_push = now
             try:
-                viewer_status = read_status_for_viewer().get("status", "unknown")
-                if viewer_status != last_status_sent:
-                    await websocket.send_json({"type": "status", "status": viewer_status})
-                    last_status_sent = viewer_status
+                viewer_status = read_status_for_viewer()
+                viewer_state = viewer_status.get("status", "unknown")
+                if viewer_state != last_status_sent:
+                    await websocket.send_json(viewer_status_payload(viewer_status))
+                    last_status_sent = viewer_state
             except Exception:
                 pass
 

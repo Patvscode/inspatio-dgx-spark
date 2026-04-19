@@ -116,3 +116,52 @@
   - verified websocket bootstrap on `ws://127.0.0.1:7861/ws` still returns `active_scene`, `status`, and `quality_sync`
 - **Status:** Done and validated locally.
 - **Next step:** Push the validated commit once GitHub credentials are available, then keep the next wake aimed at real heavy-path health instead of stale status residue.
+
+## 2026-04-19 07:05 EDT — Morning audit, push attempt, and auth blocker note
+- **Goal:** Re-check the live viewer path, avoid unnecessary churn while the stream is idle, and make sure validated fixes do not stay stranded locally.
+- **What changed:** Ran a fresh live-state audit, confirmed the viewer service is still up, HTTP is serving, websocket bootstrap is responsive, and `/health` truthfully reports an intentional stopped state with `launch_reason: operator_shutdown`. Attempted to push the six validated local commits on `main`, then captured the GitHub auth blocker when both `git push` and `gh auth status` showed expired credentials.
+- **Why:** The current viewer path is healthy enough that a random code change would be thrash. The highest-value action this wake was to verify the real surface and try to make already-validated fixes durable upstream.
+- **Files touched:**
+  - `reports/codex_turn_log.md`
+- **Validation:**
+  - `systemctl --user status inspatio-stream-viewer.service --no-pager`
+  - `curl -sS http://127.0.0.1:7861/`
+  - websocket bootstrap on `ws://127.0.0.1:7861/ws`
+  - `cat interactive_io/status.json`
+  - `curl -sS http://127.0.0.1:7861/health`
+  - `git status -sb` confirmed `main` is ahead of `origin/main` by 6 commits
+  - `git push origin main` failed with GitHub username/token prompt error
+  - `gh auth status` reported the `Patvscode` token is invalid
+- **Status:** Viewer path healthy, no low-risk product fix stood out this wake, and pushing is currently blocked on GitHub re-authentication.
+- **Next step:** Re-authenticate GitHub on this host, push `main`, then return to the real heavy-path prerequisite lane rather than making speculative UI churn.
+
+## 2026-04-19 07:38 EDT — Quiet live-state audit, no safe code churn
+- **Goal:** Re-run the required morning supervisor checks, confirm the lightweight control surface is still honest, and avoid thrash while the heavy path is idle.
+- **What changed:** Performed a fresh live-state audit only, including HTTP, `/health`, `interactive_io/status.json`, the user-systemd viewer service, and a raw websocket handshake to confirm bootstrap messages without relying on extra client packages.
+- **Why:** The current visible product surface is healthy and idle. A speculative code change would be lower value than a truthful audit note while the real blocker remains upstream heavy-path availability.
+- **Files touched:**
+  - `reports/codex_turn_log.md`
+- **Validation:**
+  - `systemctl --user status inspatio-stream-viewer.service --no-pager`
+  - `curl -sS http://127.0.0.1:7861/`
+  - `curl -sS http://127.0.0.1:7861/health`
+  - `cat interactive_io/status.json`
+  - raw Python websocket handshake to `ws://127.0.0.1:7861/ws`, which returned `active_scene`, `status=stopped`, `quality_sync`, and `timer_sync`
+  - `tail -n 120 interactive_io/dit_stream.log`, which still ends at the known CUDA OOM startup failure rather than a new hidden crash loop
+- **Status:** Viewer service remains healthy and honest, with `stream_status=stopped` and `launch_reason=operator_shutdown`. No new low-risk source fix was clearly justified in this wake.
+- **Next step:** Keep the viewer untouched while it is stable, and spend the next meaningful wake on heavy-path prerequisite recovery or GitHub re-auth so the validated local fixes can be pushed.
+
+## 2026-04-19 08:10 EDT — Honest idle-state viewer messaging on reconnect
+- **Goal:** Keep the viewer UI truthful when the stream is intentionally stopped, especially on a fresh page load or websocket reconnect.
+- **What changed:** Updated websocket `status` payloads to include `previous_status` and `launch_reason`, and taught the frontend stopped/ended state handler to replace the misleading generic loading spinner with an explicit idle message (`Stream idle. Pick a scene to start it.` / `Session ended cleanly. Pick a scene to start again.`).
+- **Why:** On a fresh reconnect, the page could stay stuck showing `Connecting to stream...` even though the backend was honestly reporting `stopped`. That made the control surface feel broken instead of idle.
+- **Files touched:**
+  - `stream_viewer.py`
+  - `reports/codex_turn_log.md`
+- **Validation:**
+  - `PYTHONPYCACHEPREFIX=/tmp/inspatio_pycache python3 -m py_compile stream_viewer.py`
+  - restarted `inspatio-stream-viewer.service` and re-verified listener on `:7861`
+  - verified `http://127.0.0.1:7861/health` still reports `stream_status=stopped` and `launch_reason=operator_shutdown`
+  - verified websocket bootstrap on `ws://127.0.0.1:7861/ws` now includes `status`, `previous_status`, and `launch_reason`
+- **Status:** Done and validated locally.
+- **Next step:** Commit this UI honesty fix locally, then attempt another push once GitHub auth is available again.
